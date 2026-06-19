@@ -1,0 +1,6 @@
+{
+  "repo_owner": "esbanegas",
+  "repo_name": "kairo-desktop",
+  "update_provider": "github_releases",
+  "github_base_url": "https://github.com/{repo_owner}/{repo_name}/releases/download/v{version}"
+}

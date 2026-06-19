@@ -1,0 +1,5 @@
+# Ignorar archivos locales del instalador e incrementales
+installer/output/
+updater/KairoUpdater/bin/
+updater/KairoUpdater/obj/
+installer/assets/postgresql_installer.exe
