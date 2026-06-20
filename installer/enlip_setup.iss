@@ -7,6 +7,9 @@
 #ifndef AppVersion
   #define AppVersion   "1.0.0"
 #endif
+#ifndef AppChannel
+  #define AppChannel   "stable"
+#endif
 #define AppPublisher "KAIRO"
 #define AppId        "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 #define AppExeName   "KAIRO POs.exe"
@@ -257,12 +260,12 @@ begin
   VersionContent :=
     '{' + #13#10 +
     '  "version": "' + '{#AppVersion}' + '",' + #13#10 +
-    '  "channel": "stable",' + #13#10 +
+    '  "channel": "' + '{#AppChannel}' + '",' + #13#10 +
     '  "update_server": "' + UpdateUrl + '"' + #13#10 +
     '}';
 
   SaveStringToFile(VersionPath, VersionContent, False);
-  Log('version.json escrito con update_server: ' + UpdateUrl);
+  Log('version.json escrito con update_server: ' + UpdateUrl + ' y canal: ' + '{#AppChannel}');
 end;
 
 procedure WriteAppSettings;

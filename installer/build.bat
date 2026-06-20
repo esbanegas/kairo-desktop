@@ -10,7 +10,26 @@ set "ROOT=%~dp0..\.."
 set "FRONTEND=%ROOT%\acg-web"
 set "BACKEND=%ROOT%\enlip-services\ENLIPWebApi"
 set "INSTALLER=%~dp0"
-if "%INSTALLER:~-1%"=="\" set "INSTALLER=%INSTALLER:~0,-1%"
+if "%INSTALLER:~-1%"=="\" set "INSTALLER=%INSTALLER=%
+
+:: 0. Leer Configuración y determinar versión SemVer resuelta (localOnly)
+for /f "tokens=*" %%V in ('powershell -NoProfile -Command "(Get-Content 'version.json' | ConvertFrom-Json).version"') do set "VERSION=%%V"
+for /f "tokens=*" %%C in ('powershell -NoProfile -Command "(Get-Content 'version.json' | ConvertFrom-Json).channel"') do set "CHANNEL=%%C"
+
+set "FULL_VERSION="
+for /f "tokens=*" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%\get-version.ps1" -version "%VERSION%" -channel "%CHANNEL%" -localOnly') do set "FULL_VERSION=%%F"
+if "%FULL_VERSION%"=="" (
+    echo [ERROR] No se pudo determinar la version o el tag ya existe.
+    exit /b 1
+)
+
+:: Hacer copia de seguridad de version.json y sobrescribir temporalmente con la versión resuelta
+copy /y "%INSTALLER%\version.json" "%INSTALLER%\version.json.bak" >nul
+powershell -NoProfile -Command "$json = Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json; $json.version = '%FULL_VERSION%'; $json | ConvertTo-Json -Depth 10 | Set-Content '%INSTALLER%\version.json'"
+
+echo Version Base: %VERSION% (%CHANNEL%)
+echo Version Compilada (SemVer): %FULL_VERSION%
+echo.
 
 :: ─────────────────────────────────────────
 :: 1. Build + Package del Frontend (Electron)
@@ -35,12 +54,14 @@ set "ASAR_PATH=release\win-unpacked\resources\app.asar"
 if not exist "!EXE_PATH!" (
     echo [ERROR] No se genero el ejecutable '!PRODUCT_NAME!.exe' en release\win-unpacked.
     echo Revisa el log de electron-builder para ver detalles del fallo.
+    call :restore_version
     exit /b 1
 )
 
 if not exist "!ASAR_PATH!" (
     echo [ERROR] No se genero el recurso 'resources\app.asar' en release\win-unpacked.
     echo Revisa el log de electron-builder para ver detalles del fallo.
+    call :restore_version
     exit /b 1
 )
 
@@ -62,6 +83,7 @@ if exist "bin\Release\net8.0\publish" (
 dotnet publish -c Release -o "bin\Release\net8.0\publish" --no-self-contained -r win-x64
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Fallo el publish del backend.
+    call :restore_version
     exit /b 1
 )
 echo [OK] Backend publicado en: %BACKEND%\bin\Release\net8.0\publish\
@@ -86,20 +108,25 @@ if not exist "!ISCC!" (
 )
 echo [INFO] Usando: !ISCC!
 
-:: Obtener versión desde version.json
-for /f "tokens=*" %%V in ('powershell -NoProfile -Command "(Get-Content 'version.json' | ConvertFrom-Json).app"') do set "APP_VERSION=%%V"
-if "%APP_VERSION%"=="" set "APP_VERSION=1.0.0"
-echo [INFO] Detectada version v%APP_VERSION% desde version.json
-
-"!ISCC!" /DAppVersion="%APP_VERSION%" "%INSTALLER%\enlip_setup.iss"
+"!ISCC!" /DAppVersion="%FULL_VERSION%" /DAppChannel="%CHANNEL%" "%INSTALLER%\enlip_setup.iss"
 if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Fallo la compilacion del instalador.
+    call :restore_version
     exit /b 1
 )
 
 echo.
 echo ============================================================
 echo  Build completado exitosamente!
-echo  Instalador: %INSTALLER%\output\ENLIP_Setup_v%APP_VERSION%.exe
+echo  Instalador: %INSTALLER%\output\ENLIP_Setup_v%FULL_VERSION%.exe
 echo ============================================================
+call :restore_version
 pause
+goto :eof
+
+:restore_version
+if exist "%INSTALLER%\version.json.bak" (
+    copy /y "%INSTALLER%\version.json.bak" "%INSTALLER%\version.json" >nul
+    del "%INSTALLER%\version.json.bak"
+)
+goto :eof

@@ -187,12 +187,12 @@ if (success && !string.IsNullOrEmpty(script.VersionJsonPath) && File.Exists(scri
         var mutable = dict.ToDictionary(k => k.Key, v => (object)v.Value.GetRawText().Trim('"'));
 
         mutable["version"]    = script.Version;
-        mutable["channel"]    = "stable"; // Maintain channel if not provided
+        mutable["channel"]    = script.Channel ?? "stable";
 
         File.WriteAllText(script.VersionJsonPath,
             JsonSerializer.Serialize(mutable, new JsonSerializerOptions { WriteIndented = true }));
 
-        Log($"version.json updated to {script.Version}");
+        Log($"version.json updated to {script.Version} (channel: {mutable["channel"]})");
     }
     catch (Exception ex)
     {
@@ -269,6 +269,7 @@ static void CopyDirectory(string source, string dest)
 // ─── Models ───────────────────────────────────────────────────────────────────
 record UpdateScript(
     [property: JsonPropertyName("version")]        string Version,
+    [property: JsonPropertyName("channel")]        string? Channel,
     [property: JsonPropertyName("timestamp")]      string Timestamp,
     [property: JsonPropertyName("appRoot")]        string AppRoot,
     [property: JsonPropertyName("appExe")]         string AppExe,

@@ -31,12 +31,25 @@ for /f "tokens=*" %%N in ('powershell -NoProfile -Command "(Get-Content '%INSTAL
 for /f "tokens=*" %%U in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\build.config.json' | ConvertFrom-Json).github_base_url"') do set "GITHUB_BASE_URL=%%U"
 for /f "tokens=*" %%D in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"yyyy-MM-ddTHH:mm:ssZ\")"') do set "BUILD_DATE=%%D"
 
-:: Reemplazar variables en GITHUB_BASE_URL
+:: Obtener la versión SemVer resuelta
+set "FULL_VERSION="
+for /f "tokens=*" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%\get-version.ps1" -version "%VERSION%" -channel "%CHANNEL%"') do set "FULL_VERSION=%%F"
+if "%FULL_VERSION%"=="" (
+    echo [ERROR] No se pudo determinar la version o el tag ya existe.
+    exit /b 1
+)
+
+:: Hacer copia de seguridad de version.json y sobrescribir temporalmente con la versión resuelta
+copy /y "%INSTALLER%\version.json" "%INSTALLER%\version.json.bak" >nul
+powershell -NoProfile -Command "$json = Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json; $json.version = '%FULL_VERSION%'; $json | ConvertTo-Json -Depth 10 | Set-Content '%INSTALLER%\version.json'"
+
+:: Reemplazar variables en GITHUB_BASE_URL usando FULL_VERSION
 set "BASE_URL=!GITHUB_BASE_URL:{repo_owner}=%REPO_OWNER%!"
 set "BASE_URL=!BASE_URL:{repo_name}=%REPO_NAME%!"
-set "BASE_URL=!BASE_URL:{version}=%VERSION%!"
+set "BASE_URL=!BASE_URL:{version}=%FULL_VERSION%!"
 
-echo Version: %VERSION% (%CHANNEL%)
+echo Version Base: %VERSION% (%CHANNEL%)
+echo Version Compilada (SemVer): %FULL_VERSION%
 echo Base URL: %BASE_URL%
 
 if exist "%INSTALLER%\output" (
@@ -44,7 +57,7 @@ if exist "%INSTALLER%\output" (
     rmdir /s /q "%INSTALLER%\output"
 )
 
-set "OUTPUT=%INSTALLER%\output\updates\%VERSION%"
+set "OUTPUT=%INSTALLER%\output\updates\%FULL_VERSION%"
 if not exist "%OUTPUT%" mkdir "%OUTPUT%"
 
 :: 2. Compilar Frontend (Electron) y Zip
@@ -63,12 +76,14 @@ set "ASAR_PATH=release\win-unpacked\resources\app.asar"
 if not exist "!EXE_PATH!" (
     echo [ERROR] No se genero el ejecutable '!PRODUCT_NAME!.exe' en release\win-unpacked.
     echo Revisa el log de electron-builder para ver detalles del fallo.
+    call :restore_version
     exit /b 1
 )
 
 if not exist "!ASAR_PATH!" (
     echo [ERROR] No se genero el recurso 'resources\app.asar' en release\win-unpacked.
     echo Revisa el log de electron-builder para ver detalles del fallo.
+    call :restore_version
     exit /b 1
 )
 
@@ -102,12 +117,13 @@ echo [3/4] Compilando instalador (Inno Setup)...
 cd /d "%INSTALLER%"
 
 set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
-"!ISCC!" /DAppVersion="%VERSION%" "%INSTALLER%\enlip_setup.iss"
+"!ISCC!" /DAppVersion="%FULL_VERSION%" /DAppChannel="%CHANNEL%" "%INSTALLER%\enlip_setup.iss"
 if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Fallo Inno Setup.
+    call :restore_version
     exit /b 1
 )
-set "INSTALLER_EXE=%INSTALLER%\output\ENLIP_Setup_v%VERSION%.exe"
+set "INSTALLER_EXE=%INSTALLER%\output\ENLIP_Setup_v%FULL_VERSION%.exe"
 set "TARGET_INSTALLER_EXE=%OUTPUT%\KairoSetup.exe"
 copy /y "%INSTALLER_EXE%" "%TARGET_INSTALLER_EXE%" >nul
 echo [OK] KairoSetup.exe
@@ -126,7 +142,7 @@ set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
   echo   "schema_version": "1.0.0",
   echo   "app": {
   echo     "name": "Kairo POS",
-  echo     "version": "%VERSION%",
+  echo     "version": "%FULL_VERSION%",
   echo     "channel": "%CHANNEL%",
   echo     "release_date": "%BUILD_DATE%"
   echo   },
@@ -161,6 +177,7 @@ echo ============================================================
 echo  Build Completado Exitosamente
 echo  Resultados en: %OUTPUT%
 echo ============================================================
+call :restore_version
 goto :eof
 
 
@@ -171,10 +188,19 @@ echo ============================================================
 
 for /f "tokens=*" %%V in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json).version"') do set "VERSION=%%V"
 for /f "tokens=*" %%C in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json).channel"') do set "CHANNEL=%%C"
-set "OUTPUT=%INSTALLER%\output\updates\%VERSION%"
+
+:: Obtener la versión SemVer resuelta
+set "FULL_VERSION="
+for /f "tokens=*" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%\get-version.ps1" -version "%VERSION%" -channel "%CHANNEL%"') do set "FULL_VERSION=%%F"
+if "%FULL_VERSION%"=="" (
+    echo [ERROR] No se pudo determinar la version o el tag ya existe.
+    exit /b 1
+)
+
+set "OUTPUT=%INSTALLER%\output\updates\%FULL_VERSION%"
 
 if not exist "%OUTPUT%\latest-%CHANNEL%.json" (
-    echo [ERROR] No existe el build local. Ejecuta --build-only primero.
+    echo [ERROR] No existe el build local en '%OUTPUT%'. Ejecuta --build-only primero.
     exit /b 1
 )
 
@@ -185,21 +211,33 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-echo [2/2] Publicando Release v%VERSION% en GitHub...
+echo [2/2] Publicando Release v%FULL_VERSION% en GitHub...
 cd /d "%INSTALLER%\.."
-git tag -a v%VERSION% -m "Release v%VERSION%"
-git push origin v%VERSION%
+git tag -a v%FULL_VERSION% -m "Release v%FULL_VERSION%"
+git push origin v%FULL_VERSION%
 
-gh release create v%VERSION% ^
+set "PRERELEASE_FLAG="
+if "%CHANNEL%"=="alpha" set "PRERELEASE_FLAG=--prerelease"
+if "%CHANNEL%"=="beta" set "PRERELEASE_FLAG=--prerelease"
+
+gh release create v%FULL_VERSION% ^
     "%OUTPUT%\KairoSetup.exe" ^
     "%OUTPUT%\frontend.zip" ^
     "%OUTPUT%\backend.zip" ^
     "%OUTPUT%\latest-%CHANNEL%.json" ^
-    --title "Kairo POS v%VERSION%" ^
-    --notes "Nueva actualizacion de Kairo POS v%VERSION%"
+    --title "Kairo POS v%FULL_VERSION%" ^
+    --notes "Nueva actualizacion de Kairo POS v%FULL_VERSION%" ^
+    !PRERELEASE_FLAG!
 
 echo.
 echo ============================================================
 echo  Publish Completado Exitosamente
 echo ============================================================
+goto :eof
+
+:restore_version
+if exist "%INSTALLER%\version.json.bak" (
+    copy /y "%INSTALLER%\version.json.bak" "%INSTALLER%\version.json" >nul
+    del "%INSTALLER%\version.json.bak"
+)
 goto :eof
