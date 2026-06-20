@@ -39,6 +39,11 @@ set "BASE_URL=!BASE_URL:{version}=%VERSION%!"
 echo Version: %VERSION% (%CHANNEL%)
 echo Base URL: %BASE_URL%
 
+if exist "%INSTALLER%\output" (
+    echo [INFO] Limpiando carpeta de salida anterior...
+    rmdir /s /q "%INSTALLER%\output"
+)
+
 set "OUTPUT=%INSTALLER%\output\updates\%VERSION%"
 if not exist "%OUTPUT%" mkdir "%OUTPUT%"
 
@@ -47,19 +52,44 @@ echo [1/4] Construyendo frontend (Vite/Electron)...
 cd /d "%FRONTEND%"
 if exist "release" rmdir /s /q "release"
 call pnpm run build:electron
-if not exist "release\win-unpacked\" (
-    echo [ERROR] No se genero release\win-unpacked
+
+:: Obtener nombre del producto/ejecutable desde package.json
+for /f "tokens=*" %%P in ('powershell -NoProfile -Command "(Get-Content 'package.json' | ConvertFrom-Json).build.productName"') do set "PRODUCT_NAME=%%P"
+if "!PRODUCT_NAME!"=="" set "PRODUCT_NAME=KAIRO POs"
+
+set "EXE_PATH=release\win-unpacked\!PRODUCT_NAME!.exe"
+set "ASAR_PATH=release\win-unpacked\resources\app.asar"
+
+if not exist "!EXE_PATH!" (
+    echo [ERROR] No se genero el ejecutable '!PRODUCT_NAME!.exe' en release\win-unpacked.
+    echo Revisa el log de electron-builder para ver detalles del fallo.
     exit /b 1
 )
 
+if not exist "!ASAR_PATH!" (
+    echo [ERROR] No se genero el recurso 'resources\app.asar' en release\win-unpacked.
+    echo Revisa el log de electron-builder para ver detalles del fallo.
+    exit /b 1
+)
+
+echo [OK] Frontend compilado y verificado correctamente (!PRODUCT_NAME!.exe).
+
 set "FRONTEND_ZIP=%OUTPUT%\frontend.zip"
 if exist "%FRONTEND_ZIP%" del "%FRONTEND_ZIP%"
-powershell -NoProfile -Command "Compress-Archive -Path '%FRONTEND%\dist\*' -DestinationPath '%FRONTEND_ZIP%' -Force"
-echo [OK] frontend.zip
+:: Comprimir app.asar en lugar de dist/*
+powershell -NoProfile -Command "Compress-Archive -Path '%ASAR_PATH%' -DestinationPath '%FRONTEND_ZIP%' -Force"
+echo [OK] frontend.zip (empaquetado con app.asar)
+
 
 :: 3. Compilar Backend y Zip
 echo [2/4] Construyendo backend (.NET)...
 cd /d "%BACKEND%"
+
+if exist "bin\Release\net8.0\publish" (
+    echo [INFO] Limpiando publicacion anterior del backend...
+    rmdir /s /q "bin\Release\net8.0\publish"
+)
+
 dotnet publish -c Release -o "bin\Release\net8.0\publish" --no-self-contained -r win-x64
 set "BACKEND_ZIP=%OUTPUT%\backend.zip"
 set "BACKEND_PUBLISH=%BACKEND%\bin\Release\net8.0\publish"
@@ -70,6 +100,7 @@ echo [OK] backend.zip
 :: 4. Compilar Instalador
 echo [3/4] Compilando instalador (Inno Setup)...
 cd /d "%INSTALLER%"
+
 set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
 "!ISCC!" /DAppVersion="%VERSION%" "%INSTALLER%\enlip_setup.iss"
 if !ERRORLEVEL! NEQ 0 (

@@ -24,13 +24,28 @@ if exist "release" (
 )
 
 call pnpm run build:electron
-:: electron-builder puede fallar en winCodeSign (symlinks) pero el exe ya fue creado.
-:: Verificamos que win-unpacked exista en lugar de revisar ERRORLEVEL.
-if not exist "release\win-unpacked\" (
-    echo [ERROR] No se genero release\win-unpacked. Revisa el log de electron-builder.
+
+:: Obtener nombre del producto/ejecutable desde package.json
+for /f "tokens=*" %%P in ('powershell -NoProfile -Command "(Get-Content 'package.json' | ConvertFrom-Json).build.productName"') do set "PRODUCT_NAME=%%P"
+if "!PRODUCT_NAME!"=="" set "PRODUCT_NAME=KAIRO POs"
+
+set "EXE_PATH=release\win-unpacked\!PRODUCT_NAME!.exe"
+set "ASAR_PATH=release\win-unpacked\resources\app.asar"
+
+if not exist "!EXE_PATH!" (
+    echo [ERROR] No se genero el ejecutable '!PRODUCT_NAME!.exe' en release\win-unpacked.
+    echo Revisa el log de electron-builder para ver detalles del fallo.
     exit /b 1
 )
-echo [OK] Frontend empaquetado en: %FRONTEND%\release\win-unpacked\
+
+if not exist "!ASAR_PATH!" (
+    echo [ERROR] No se genero el recurso 'resources\app.asar' en release\win-unpacked.
+    echo Revisa el log de electron-builder para ver detalles del fallo.
+    exit /b 1
+)
+
+echo [OK] Frontend empaquetado correctamente en: %FRONTEND%\release\win-unpacked\
+echo [OK] Ejecutable verificado: !EXE_PATH!
 echo.
 
 :: ─────────────────────────────────────────
@@ -38,6 +53,11 @@ echo.
 :: ─────────────────────────────────────────
 echo [2/3] Publicando el backend (.NET 8)...
 cd /d "%BACKEND%"
+
+if exist "bin\Release\net8.0\publish" (
+    echo [INFO] Limpiando publicacion anterior del backend...
+    rmdir /s /q "bin\Release\net8.0\publish"
+)
 
 dotnet publish -c Release -o "bin\Release\net8.0\publish" --no-self-contained -r win-x64
 if %ERRORLEVEL% NEQ 0 (
@@ -52,6 +72,11 @@ echo.
 :: ─────────────────────────────────────────
 echo [3/3] Compilando instalador con Inno Setup...
 cd /d "%INSTALLER%"
+
+if exist "output" (
+    echo [INFO] Limpiando carpeta de salida de instaladores anteriores...
+    rmdir /s /q "output"
+)
 
 :: Ruta de ISCC
 set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
