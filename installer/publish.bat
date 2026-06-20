@@ -171,7 +171,7 @@ set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
   echo   }
   echo }
 ) > "%MANIFEST%"
-
+echo %FULL_VERSION%> "%INSTALLER%\output\build_version.txt"
 echo.
 echo ============================================================
 echo  Build Completado Exitosamente
@@ -189,11 +189,20 @@ echo ============================================================
 for /f "tokens=*" %%V in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json).version"') do set "VERSION=%%V"
 for /f "tokens=*" %%C in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json).channel"') do set "CHANNEL=%%C"
 
-:: Obtener la versión SemVer resuelta
 set "FULL_VERSION="
-for /f "tokens=*" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%\get-version.ps1" -version "%VERSION%" -channel "%CHANNEL%"') do set "FULL_VERSION=%%F"
-if "%FULL_VERSION%"=="" (
-    echo [ERROR] No se pudo determinar la version o el tag ya existe.
+if exist "%INSTALLER%\output\build_version.txt" (
+    for /f "usebackq tokens=*" %%F in ("%INSTALLER%\output\build_version.txt") do set "FULL_VERSION=%%F"
+    if defined FULL_VERSION set "FULL_VERSION=!FULL_VERSION: =!"
+    echo [INFO] Detectada version compilada previa: !FULL_VERSION!
+)
+
+if "!FULL_VERSION!"=="" (
+    echo [INFO] No se encontro registro de compilacion previa. Resolviendo version...
+    for /f "tokens=*" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%\get-version.ps1" -version "%VERSION%" -channel "%CHANNEL%"') do set "FULL_VERSION=%%F"
+)
+
+if "!FULL_VERSION!"=="" (
+    echo [ERROR] No se pudo determinar la version de la publicacion.
     exit /b 1
 )
 
@@ -213,7 +222,13 @@ if !ERRORLEVEL! NEQ 0 (
 
 echo [2/2] Publicando Release v%FULL_VERSION% en GitHub...
 cd /d "%INSTALLER%\.."
-git tag -a v%FULL_VERSION% -m "Release v%FULL_VERSION%"
+
+git rev-parse "v%FULL_VERSION%" >nul 2>&1
+if !ERRORLEVEL! NEQ 0 (
+    git tag -a v%FULL_VERSION% -m "Release v%FULL_VERSION%"
+) else (
+    echo [INFO] El tag v%FULL_VERSION% ya existe localmente. Omitiendo creacion...
+)
 git push origin v%FULL_VERSION%
 
 set "PRERELEASE_FLAG="
@@ -229,6 +244,7 @@ gh release create v%FULL_VERSION% ^
     --notes "Nueva actualizacion de Kairo POS v%FULL_VERSION%" ^
     !PRERELEASE_FLAG!
 
+if exist "%INSTALLER%\output\build_version.txt" del "%INSTALLER%\output\build_version.txt"
 echo.
 echo ============================================================
 echo  Publish Completado Exitosamente
