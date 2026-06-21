@@ -80,7 +80,7 @@ if exist "bin\Release\net8.0\publish" (
     rmdir /s /q "bin\Release\net8.0\publish"
 )
 
-dotnet publish -c Release -o "bin\Release\net8.0\publish" --no-self-contained -r win-x64
+dotnet publish -c Release -o "bin\Release\net8.0\publish" -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Fallo el publish del backend.
     call :restore_version

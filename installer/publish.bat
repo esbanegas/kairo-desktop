@@ -105,7 +105,7 @@ if exist "bin\Release\net8.0\publish" (
     rmdir /s /q "bin\Release\net8.0\publish"
 )
 
-dotnet publish -c Release -o "bin\Release\net8.0\publish" --no-self-contained -r win-x64
+dotnet publish -c Release -o "bin\Release\net8.0\publish" -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
 set "BACKEND_ZIP=%OUTPUT%\backend.zip"
 set "BACKEND_PUBLISH=%BACKEND%\bin\Release\net8.0\publish"
 if exist "%BACKEND_ZIP%" del "%BACKEND_ZIP%"
