@@ -136,7 +136,7 @@ begin
   else
     AdminPass := PgAdminPass.Text;
 
-  Result := '--mode unattended --unattendedmodeui minimal --disable-components stackbuilder --postgrespassword "' + AdminPass + '"';
+  Result := '--mode unattended --unattendedmodeui minimal --disable-components stackbuilder --superpassword "' + AdminPass + '"';
 end;
 
 function WinGetTickCount: DWord; external 'GetTickCount@kernel32.dll stdcall';
