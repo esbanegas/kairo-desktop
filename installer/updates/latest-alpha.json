@@ -1,0 +1,33 @@
+{
+  "schema": "kairo.update.manifest",
+  "schema_version": "1.0.0",
+  "app": {
+    "name": "Kairo POS",
+    "version": "1.0.0-alpha.1",
+    "channel": "alpha",
+    "release_date": "2026-06-21T05:18:28Z"
+  },
+  "distribution": {
+    "provider": "github_releases",
+    "base_url": "https://github.com/esbanegas/kairo-desktop/releases/download/v1.0.0-alpha.1"
+  },
+  "files": {
+    "installer": {
+      "name": "KairoSetup.exe",
+      "sha256": "a71f46c51fd36ee4db48c988d4358a861526ca7c1dedf19da48715a295b9ad52"
+    },
+    "frontend": {
+      "name": "frontend.zip",
+      "sha256": "bf0d65b954d078b4dc11118ed6721182519f9f6e9a6c19becb58519d54558866"
+    },
+    "backend": {
+      "name": "backend.zip",
+      "sha256": "d07a9c951d9b50cbcd1d0b243f413a8f7292735684c6cda2007ae51401f7efc9"
+    }
+  },
+  "update_policy": {
+    "mandatory": false,
+    "min_supported_version": "1.0.0",
+    "restart_required": true
+  }
+}
