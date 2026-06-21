@@ -117,7 +117,7 @@ echo [3/4] Compilando instalador (Inno Setup)...
 cd /d "%INSTALLER%"
 
 set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
-"!ISCC!" /DAppVersion="%FULL_VERSION%" /DAppChannel="%CHANNEL%" "%INSTALLER%\enlip_setup.iss"
+"!ISCC!" /DAppVersion="%FULL_VERSION%" /DAppChannel="%CHANNEL%" /DUpdateServerUrl="https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/main/installer/updates" "%INSTALLER%\enlip_setup.iss"
 if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Fallo Inno Setup.
     call :restore_version
@@ -243,6 +243,19 @@ gh release create v%FULL_VERSION% ^
     --title "Kairo POS v%FULL_VERSION%" ^
     --notes "Nueva actualizacion de Kairo POS v%FULL_VERSION%" ^
     !PRERELEASE_FLAG!
+
+if !ERRORLEVEL! NEQ 0 (
+    echo [ERROR] Fallo la creacion de la release en GitHub.
+    exit /b 1
+)
+
+echo [3/3] Publicando manifiesto de actualizacion en git...
+if not exist "%INSTALLER%\updates" mkdir "%INSTALLER%\updates"
+copy /y "%OUTPUT%\latest-%CHANNEL%.json" "%INSTALLER%\updates\latest-%CHANNEL%.json" >nul
+
+git add "%INSTALLER%\updates\latest-%CHANNEL%.json"
+git commit -m "Update manifest for v%FULL_VERSION% [skip ci]"
+git push origin HEAD
 
 if exist "%INSTALLER%\output\build_version.txt" del "%INSTALLER%\output\build_version.txt"
 echo.

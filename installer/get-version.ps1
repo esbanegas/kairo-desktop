@@ -6,18 +6,21 @@ param(
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# Strip any existing prerelease or build suffix (e.g. -alpha.1)
+$baseVersion = $version -replace '-[a-zA-Z0-9.-]+$', ''
+
 if ($channel -eq "stable") {
     if (-not $localOnly) {
         try {
             git fetch --tags --force 2>$null
         } catch {}
     }
-    $exists = git tag -l "v$version"
+    $exists = git tag -l "v$baseVersion"
     if ($exists) {
-        [Console]::Error.WriteLine("ERROR: El tag v$version ya existe en el repositorio.")
+        [Console]::Error.WriteLine("ERROR: El tag v$baseVersion ya existe en el repositorio.")
         exit 1
     }
-    Write-Output $version
+    Write-Output $baseVersion
 } else {
     if (-not $localOnly) {
         try {
@@ -25,7 +28,7 @@ if ($channel -eq "stable") {
         } catch {}
     }
 
-    $prefix = "v$version-$channel."
+    $prefix = "v$baseVersion-$channel."
     $tags = git tag -l "$prefix*"
     $max = 0
     foreach ($t in $tags) {
@@ -35,5 +38,5 @@ if ($channel -eq "stable") {
         }
     }
     $next = $max + 1
-    Write-Output "$version-$channel.$next"
+    Write-Output "$baseVersion-$channel.$next"
 }

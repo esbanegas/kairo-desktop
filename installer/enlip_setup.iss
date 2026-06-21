@@ -13,6 +13,9 @@
 #define AppPublisher "KAIRO"
 #define AppId        "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 #define AppExeName   "KAIRO POs.exe"
+#ifndef UpdateServerUrl
+  #define UpdateServerUrl "https://raw.githubusercontent.com/esbanegas/kairo-desktop/main/installer/updates"
+#endif
 
 #define FrontendDir  "..\..\acg-web\release\win-unpacked"
 #define BackendDir   "..\..\enlip-services\ENLIPWebApi\bin\Release\net8.0\publish"
@@ -200,7 +203,7 @@ begin
   UpdateServerLabel.Parent := UpdatePage.Surface;
 
   UpdateServerEdit := TEdit.Create(UpdatePage);
-  UpdateServerEdit.Text := 'https://updates.kairopos.com';
+  UpdateServerEdit.Text := '{#UpdateServerUrl}';
   UpdateServerEdit.Top := 38;
   UpdateServerEdit.Width := 420;
   UpdateServerEdit.Left := 0;
@@ -255,7 +258,7 @@ begin
   VersionPath := ExpandConstant('{app}\version.json');
   UpdateUrl := Trim(UpdateServerEdit.Text);
   if UpdateUrl = '' then
-    UpdateUrl := 'https://updates.kairopos.com';
+    UpdateUrl := '{#UpdateServerUrl}';
 
   VersionContent :=
     '{' + #13#10 +
