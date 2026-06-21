@@ -65,7 +65,7 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{tmp}\postgresql_installer.exe"; Parameters: "--mode unattended --unattendedmodeui minimal --disable-components stackbuilder"; StatusMsg: "Instalando PostgreSQL..."; Check: ShouldInstallPostgres
+Filename: "{tmp}\postgresql_installer.exe"; Parameters: "{code:GetPostgresInstallerParams}"; StatusMsg: "Instalando PostgreSQL..."; Check: ShouldInstallPostgres
 Filename: "{app}\{#AppExeName}"; Description: "Abrir {#AppName} ahora"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -74,17 +74,29 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 
 var
-  PgPage: TWizardPage;
+  PgModePage: TWizardPage;
+  AutoModeRadio: TRadioButton;
+  CustomModeRadio: TRadioButton;
+  AutoModeLabel: TLabel;
+  CustomModeLabel: TLabel;
+
+  PgConfigPage: TWizardPage;
   PgHost: TEdit;
   PgPort: TEdit;
-  PgDb: TEdit;
-  PgUser: TEdit;
-  PgPass: TEdit;
+  PgAdminUser: TEdit;
+  PgAdminPass: TEdit;
+  PgDbName: TEdit;
+  PgAppUser: TEdit;
+  PgAppPass: TEdit;
+
   PgHostLabel: TLabel;
   PgPortLabel: TLabel;
-  PgDbLabel: TLabel;
-  PgUserLabel: TLabel;
-  PgPassLabel: TLabel;
+  PgAdminUserLabel: TLabel;
+  PgAdminPassLabel: TLabel;
+  PgDbNameLabel: TLabel;
+  PgAppUserLabel: TLabel;
+  PgAppPassLabel: TLabel;
+
   { ── Update Server page ── }
   UpdatePage: TWizardPage;
   UpdateServerEdit: TEdit;
@@ -115,84 +127,198 @@ begin
     Log('kairo-updater.exe no encontrado en assets - se omitira en esta version.');
 end;
 
-procedure CreatePgPage;
+function GetPostgresInstallerParams(Value: String): String;
 var
-  Top: Integer;
+  AdminPass: String;
 begin
-  PgPage := CreateCustomPage(wpSelectDir, 'Configuracion de Base de Datos',
-    'Ingresa los datos de conexion a PostgreSQL para ENLIP.');
+  if AutoModeRadio.Checked then
+    AdminPass := 'postgres'
+  else
+    AdminPass := PgAdminPass.Text;
 
-  Top := 20;
+  Result := '--mode unattended --unattendedmodeui minimal --disable-components stackbuilder --postgrespassword "' + AdminPass + '"';
+end;
 
-  PgHostLabel := TLabel.Create(PgPage);
+function WinGetTickCount: DWord; external 'GetTickCount@kernel32.dll stdcall';
+
+var
+  RandSeed: LongInt;
+
+procedure InitRand;
+begin
+  RandSeed := WinGetTickCount;
+end;
+
+function GetRand(Max: Integer): Integer;
+begin
+  RandSeed := (RandSeed * 1103515245 + 12345) and $7FFFFFFF;
+  Result := RandSeed mod Max;
+end;
+
+function GenerateRandomPassword(PassLength: Integer): string;
+var
+  Chars: string;
+  I: Integer;
+  Idx: Integer;
+begin
+  Chars := 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  Result := '';
+  for I := 1 to PassLength do
+  begin
+    Idx := GetRand(Length(Chars)) + 1;
+    Result := Result + Copy(Chars, Idx, 1);
+  end;
+end;
+
+procedure CreatePgModePage;
+begin
+  PgModePage := CreateCustomPage(wpSelectDir, 'Modo de Configuración de Base de Datos',
+    'Elige cómo deseas configurar la base de datos PostgreSQL.');
+
+  AutoModeRadio := TRadioButton.Create(PgModePage);
+  AutoModeRadio.Caption := 'Modo automático (recomendado)';
+  AutoModeRadio.Font.Style := [fsBold];
+  AutoModeRadio.Top := 20;
+  AutoModeRadio.Left := 10;
+  AutoModeRadio.Width := 400;
+  AutoModeRadio.Checked := True;
+  AutoModeRadio.Parent := PgModePage.Surface;
+
+  AutoModeLabel := TLabel.Create(PgModePage);
+  AutoModeLabel.Caption := 'Configura PostgreSQL con valores seguros automáticos.' + #13#10 +
+    'Se creará la base de datos "KAIRO_DB" y el usuario "kairo_user"' + #13#10 +
+    'con una contraseña segura generada automáticamente.';
+  AutoModeLabel.Top := 40;
+  AutoModeLabel.Left := 30;
+  AutoModeLabel.Width := 400;
+  AutoModeLabel.Height := 50;
+  AutoModeLabel.Parent := PgModePage.Surface;
+
+  CustomModeRadio := TRadioButton.Create(PgModePage);
+  CustomModeRadio.Caption := 'Modo personalizado (avanzado)';
+  CustomModeRadio.Font.Style := [fsBold];
+  CustomModeRadio.Top := 100;
+  CustomModeRadio.Left := 10;
+  CustomModeRadio.Width := 400;
+  CustomModeRadio.Parent := PgModePage.Surface;
+
+  CustomModeLabel := TLabel.Create(PgModePage);
+  CustomModeLabel.Caption := 'Permite especificar manualmente las credenciales del' + #13#10 +
+    'administrador (postgres) y los detalles de la base de datos' + #13#10 +
+    'y el usuario que utilizará la aplicación.';
+  CustomModeLabel.Top := 120;
+  CustomModeLabel.Left := 30;
+  CustomModeLabel.Width := 400;
+  CustomModeLabel.Height := 50;
+  CustomModeLabel.Parent := PgModePage.Surface;
+end;
+
+procedure CreatePgConfigPage;
+begin
+  PgConfigPage := CreateCustomPage(PgModePage.ID, 'Configuración Personalizada de PostgreSQL',
+    'Ingresa las credenciales de administrador y de la aplicación.');
+
+  // --- Fila 1: Host y Puerto ---
+  PgHostLabel := TLabel.Create(PgConfigPage);
   PgHostLabel.Caption := 'Host:';
-  PgHostLabel.Top := Top;
+  PgHostLabel.Top := 10;
   PgHostLabel.Left := 0;
-  PgHostLabel.Parent := PgPage.Surface;
-  PgHost := TEdit.Create(PgPage);
+  PgHostLabel.Parent := PgConfigPage.Surface;
+  
+  PgHost := TEdit.Create(PgConfigPage);
   PgHost.Text := 'localhost';
-  PgHost.Top := Top + 18;
-  PgHost.Width := 300;
+  PgHost.Top := 28;
   PgHost.Left := 0;
-  PgHost.Parent := PgPage.Surface;
-  Top := Top + 54;
+  PgHost.Width := 180;
+  PgHost.Parent := PgConfigPage.Surface;
 
-  PgPortLabel := TLabel.Create(PgPage);
+  PgPortLabel := TLabel.Create(PgConfigPage);
   PgPortLabel.Caption := 'Puerto:';
-  PgPortLabel.Top := Top;
-  PgPortLabel.Left := 0;
-  PgPortLabel.Parent := PgPage.Surface;
-  PgPort := TEdit.Create(PgPage);
+  PgPortLabel.Top := 10;
+  PgPortLabel.Left := 200;
+  PgPortLabel.Parent := PgConfigPage.Surface;
+  
+  PgPort := TEdit.Create(PgConfigPage);
   PgPort.Text := '5432';
-  PgPort.Top := Top + 18;
-  PgPort.Width := 100;
-  PgPort.Left := 0;
-  PgPort.Parent := PgPage.Surface;
-  Top := Top + 54;
+  PgPort.Top := 28;
+  PgPort.Left := 200;
+  PgPort.Width := 80;
+  PgPort.Parent := PgConfigPage.Surface;
 
-  PgDbLabel := TLabel.Create(PgPage);
-  PgDbLabel.Caption := 'Base de datos:';
-  PgDbLabel.Top := Top;
-  PgDbLabel.Left := 0;
-  PgDbLabel.Parent := PgPage.Surface;
-  PgDb := TEdit.Create(PgPage);
-  PgDb.Text := 'ENLIP_DB';
-  PgDb.Top := Top + 18;
-  PgDb.Width := 300;
-  PgDb.Left := 0;
-  PgDb.Parent := PgPage.Surface;
-  Top := Top + 54;
+  // --- Fila 2: Administrador PostgreSQL ---
+  PgAdminUserLabel := TLabel.Create(PgConfigPage);
+  PgAdminUserLabel.Caption := 'Admin PostgreSQL (Usuario):';
+  PgAdminUserLabel.Top := 65;
+  PgAdminUserLabel.Left := 0;
+  PgAdminUserLabel.Parent := PgConfigPage.Surface;
+  
+  PgAdminUser := TEdit.Create(PgConfigPage);
+  PgAdminUser.Text := 'postgres';
+  PgAdminUser.Top := 83;
+  PgAdminUser.Left := 0;
+  PgAdminUser.Width := 180;
+  PgAdminUser.Parent := PgConfigPage.Surface;
 
-  PgUserLabel := TLabel.Create(PgPage);
-  PgUserLabel.Caption := 'Usuario:';
-  PgUserLabel.Top := Top;
-  PgUserLabel.Left := 0;
-  PgUserLabel.Parent := PgPage.Surface;
-  PgUser := TEdit.Create(PgPage);
-  PgUser.Text := 'postgres';
-  PgUser.Top := Top + 18;
-  PgUser.Width := 200;
-  PgUser.Left := 0;
-  PgUser.Parent := PgPage.Surface;
-  Top := Top + 54;
+  PgAdminPassLabel := TLabel.Create(PgConfigPage);
+  PgAdminPassLabel.Caption := 'Admin PostgreSQL (Contraseña):';
+  PgAdminPassLabel.Top := 65;
+  PgAdminPassLabel.Left := 200;
+  PgAdminPassLabel.Parent := PgConfigPage.Surface;
+  
+  PgAdminPass := TEdit.Create(PgConfigPage);
+  PgAdminPass.PasswordChar := '*';
+  PgAdminPass.Text := '';
+  PgAdminPass.Top := 83;
+  PgAdminPass.Left := 200;
+  PgAdminPass.Width := 180;
+  PgAdminPass.Parent := PgConfigPage.Surface;
 
-  PgPassLabel := TLabel.Create(PgPage);
-  PgPassLabel.Caption := 'Contrasena:';
-  PgPassLabel.Top := Top;
-  PgPassLabel.Left := 0;
-  PgPassLabel.Parent := PgPage.Surface;
-  PgPass := TEdit.Create(PgPage);
-  PgPass.PasswordChar := '*';
-  PgPass.Text := '';
-  PgPass.Top := Top + 18;
-  PgPass.Width := 200;
-  PgPass.Left := 0;
-  PgPass.Parent := PgPage.Surface;
+  // --- Fila 3: Base de Datos de Aplicación ---
+  PgDbNameLabel := TLabel.Create(PgConfigPage);
+  PgDbNameLabel.Caption := 'Nombre de Base de Datos:';
+  PgDbNameLabel.Top := 120;
+  PgDbNameLabel.Left := 0;
+  PgDbNameLabel.Parent := PgConfigPage.Surface;
+  
+  PgDbName := TEdit.Create(PgConfigPage);
+  PgDbName.Text := 'KAIRO_DB';
+  PgDbName.Top := 138;
+  PgDbName.Left := 0;
+  PgDbName.Width := 180;
+  PgDbName.Parent := PgConfigPage.Surface;
+
+  // --- Fila 4: Credenciales de Aplicación ---
+  PgAppUserLabel := TLabel.Create(PgConfigPage);
+  PgAppUserLabel.Caption := 'Usuario de la Aplicación:';
+  PgAppUserLabel.Top := 175;
+  PgAppUserLabel.Left := 0;
+  PgAppUserLabel.Parent := PgConfigPage.Surface;
+  
+  PgAppUser := TEdit.Create(PgConfigPage);
+  PgAppUser.Text := 'kairo_user';
+  PgAppUser.Top := 193;
+  PgAppUser.Left := 0;
+  PgAppUser.Width := 180;
+  PgAppUser.Parent := PgConfigPage.Surface;
+
+  PgAppPassLabel := TLabel.Create(PgConfigPage);
+  PgAppPassLabel.Caption := 'Contraseña de la Aplicación:';
+  PgAppPassLabel.Top := 175;
+  PgAppPassLabel.Left := 200;
+  PgAppPassLabel.Parent := PgConfigPage.Surface;
+  
+  PgAppPass := TEdit.Create(PgConfigPage);
+  PgAppPass.PasswordChar := '*';
+  PgAppPass.Text := '';
+  PgAppPass.Top := 193;
+  PgAppPass.Left := 200;
+  PgAppPass.Width := 180;
+  PgAppPass.Parent := PgConfigPage.Surface;
 end;
 
 procedure CreateUpdateServerPage;
 begin
-  UpdatePage := CreateCustomPage(PgPage.ID,
+  UpdatePage := CreateCustomPage(PgConfigPage.ID,
     'Servidor de Actualizaciones',
     'URL desde donde la aplicacion descargara las actualizaciones automaticamente.');
 
@@ -227,23 +353,59 @@ end;
 
 procedure InitializeWizard;
 begin
-  CreatePgPage;
+  InitRand;
+  CreatePgModePage;
+  CreatePgConfigPage;
   CreateUpdateServerPage;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if PageID = PgConfigPage.ID then
+  begin
+    Result := AutoModeRadio.Checked;
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if CurPageID = PgPage.ID then
+  if CurPageID = PgConfigPage.ID then
   begin
     if Trim(PgHost.Text) = '' then
     begin
       MsgBox('Por favor ingresa el host de PostgreSQL.', mbError, MB_OK);
       Result := False;
     end
-    else if Trim(PgDb.Text) = '' then
+    else if Trim(PgPort.Text) = '' then
+    begin
+      MsgBox('Por favor ingresa el puerto de PostgreSQL.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Trim(PgAdminUser.Text) = '' then
+    begin
+      MsgBox('Por favor ingresa el usuario administrador de PostgreSQL.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Trim(PgAdminPass.Text) = '' then
+    begin
+      MsgBox('Por favor ingresa la contraseña del administrador de PostgreSQL.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Trim(PgDbName.Text) = '' then
     begin
       MsgBox('Por favor ingresa el nombre de la base de datos.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Trim(PgAppUser.Text) = '' then
+    begin
+      MsgBox('Por favor ingresa el usuario de la aplicación.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Trim(PgAppPass.Text) = '' then
+    begin
+      MsgBox('Por favor ingresa la contraseña del usuario de la aplicación.', mbError, MB_OK);
       Result := False;
     end;
   end;
@@ -274,18 +436,50 @@ end;
 procedure WriteAppSettings;
 var
   SettingsPath: String;
+  Host, Port, DbName, AppUser, AppPass, AdminUser, AdminPass: String;
   ConnString: String;
+  StoragePath: String;
   JsonContent: String;
 begin
   SettingsPath := ExpandConstant('{app}\api\appsettings.json');
-  ConnString := 'Host=' + PgHost.Text + ';Port=' + PgPort.Text
-    + ';Database=' + PgDb.Text + ';Username=' + PgUser.Text
-    + ';Password=' + PgPass.Text;
+  StoragePath := ExpandConstant('{commonappdata}\KairoPOS\Files');
+  StringChange(StoragePath, '\', '\\');
+
+  if AutoModeRadio.Checked then
+  begin
+    Host := 'localhost';
+    Port := '5432';
+    DbName := 'KAIRO_DB';
+    AppUser := 'kairo_user';
+    AppPass := GenerateRandomPassword(16);
+    AdminUser := 'postgres';
+    AdminPass := 'postgres';
+  end
+  else
+  begin
+    Host := PgHost.Text;
+    Port := PgPort.Text;
+    DbName := PgDbName.Text;
+    AppUser := PgAppUser.Text;
+    AppPass := PgAppPass.Text;
+    AdminUser := PgAdminUser.Text;
+    AdminPass := PgAdminPass.Text;
+  end;
+
+  ConnString := 'Host=' + Host + ';Port=' + Port
+    + ';Database=' + DbName + ';Username=' + AppUser
+    + ';Password=' + AppPass;
 
   JsonContent :=
     '{' + #13#10 +
     '  "ConnectionStrings": {' + #13#10 +
     '    "ENLIP_Database": "' + ConnString + '"' + #13#10 +
+    '  },' + #13#10 +
+    '  "PostgresAdminSettings": {' + #13#10 +
+    '    "Host": "' + Host + '",' + #13#10 +
+    '    "Port": "' + Port + '",' + #13#10 +
+    '    "Username": "' + AdminUser + '",' + #13#10 +
+    '    "Password": "' + AdminPass + '"' + #13#10 +
     '  },' + #13#10 +
     '  "DatabaseSettings": {' + #13#10 +
     '    "TimeZone": "America/Tegucigalpa"' + #13#10 +
@@ -296,9 +490,10 @@ begin
     '      "Microsoft.AspNetCore": "Warning"' + #13#10 +
     '    }' + #13#10 +
     '  },' + #13#10 +
-    '  "AzureBlobStorage": {' + #13#10 +
-    '    "ConnectionString": "UseDevelopmentStorage=true",' + #13#10 +
-    '    "ContainerName": "enlip-pos"' + #13#10 +
+    '  "Storage": {' + #13#10 +
+    '    "Provider": "Local",' + #13#10 +
+    '    "LocalRootPath": "' + StoragePath + '",' + #13#10 +
+    '    "LocalApiBaseUrl": "http://localhost:8855"' + #13#10 +
     '  },' + #13#10 +
     '  "Localization": {' + #13#10 +
     '    "SupportedCultures": [ "en", "es" ],' + #13#10 +
