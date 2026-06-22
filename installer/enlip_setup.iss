@@ -44,21 +44,22 @@ DisableProgramGroupPage=yes
 Name: "desktopicon"; Description: "Crear icono en el Escritorio"; GroupDescription: "Iconos adicionales:"; Flags: unchecked
 
 [Files]
-; ── Application files ──────────────────────────────────────────────────
+; ── Frontend (Electron) — always installed ─────────────────────────────────
 Source: "{#FrontendDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
-Source: "{#BackendDir}\*"; DestDir: "{app}\api"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,appsettings*.json,appsettings - Copy*.json,web.config"
-; appsettings.json: onlyifdoesntexist preserves DB credentials on reinstall.
-; WriteAppSettings procedure handles the FIRST install write.
-Source: "{#BackendDir}\appsettings.json"; DestDir: "{app}\api"; Flags: ignoreversion onlyifdoesntexist
 
-; ── Version manifest (read by backend and Electron) ────────────────────
+; ── Backend (.NET 8) — skipped in Client mode ──────────────────────────────
+Source: "{#BackendDir}\*"; DestDir: "{app}\api"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,appsettings*.json,appsettings - Copy*.json,web.config"; Check: ShouldInstallBackend
+; appsettings.json: onlyifdoesntexist preserves DB credentials on reinstall.
+Source: "{#BackendDir}\appsettings.json"; DestDir: "{app}\api"; Flags: ignoreversion onlyifdoesntexist; Check: ShouldInstallBackend
+
+; ── Version manifest (read by backend and Electron) ────────────────────────
 Source: "version.json"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Kairo Updater (external process that replaces files after Electron exits)
 Source: "assets\kairo-updater\kairo-updater.exe"; DestDir: "{app}\updater"; Flags: ignoreversion; Check: UpdaterExists
 
-; ── Dependencies ────────────────────────────────────────────────────────
-Source: "assets\postgresql_installer.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+; ── PostgreSQL installer — extracted to temp only when needed ───────────────
+Source: "assets\postgresql_installer.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallBackend
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -71,15 +72,41 @@ Filename: "{app}\{#AppExeName}"; Description: "Abrir {#AppName} ahora"; Flags: n
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 
+[Dirs]
+Name: "{commonappdata}\KairoPOS"; Permissions: users-modify
+Name: "{commonappdata}\KairoPOS\Files"; Permissions: users-modify
+Name: "{commonappdata}\KairoPOS\backups"; Permissions: users-modify
+Name: "{commonappdata}\KairoPOS\state"; Permissions: users-modify
+
 [Code]
 
 var
+  { ── Auto-mode: app user password (random, generated once) }
+  AutoAppPass: String;
+
+  { ── Installation mode page ── }
+  InstallModePage: TWizardPage;
+  StandaloneRadio: TRadioButton;
+  ServerRadio: TRadioButton;
+  ClientRadio: TRadioButton;
+  StandaloneLabel: TLabel;
+  ServerLabel: TLabel;
+  ClientLabel: TLabel;
+
+  { ── Client server URL page ── }
+  ClientConfigPage: TWizardPage;
+  ServerIpEdit: TEdit;
+  ServerIpLabel: TLabel;
+  ServerIpNote: TLabel;
+
+  { ── Database mode page ── }
   PgModePage: TWizardPage;
   AutoModeRadio: TRadioButton;
   CustomModeRadio: TRadioButton;
   AutoModeLabel: TLabel;
   CustomModeLabel: TLabel;
 
+  { ── PostgreSQL custom config page ── }
   PgConfigPage: TWizardPage;
   PgHost: TEdit;
   PgPort: TEdit;
@@ -97,11 +124,28 @@ var
   PgAppUserLabel: TLabel;
   PgAppPassLabel: TLabel;
 
+  { ── Auto-mode admin password field (shown on PgModePage) }
+  PgAdminPassAutoMode: TEdit;
+  PgAdminPassAutoModeLabel: TLabel;
+  PgAdminPassAutoModeNote: TLabel;
+
   { ── Update Server page ── }
   UpdatePage: TWizardPage;
   UpdateServerEdit: TEdit;
   UpdateServerLabel: TLabel;
   UpdateServerNote: TLabel;
+
+{ ── Mode helpers ─────────────────────────────────────────────────────────── }
+
+function IsClientMode: Boolean;
+begin
+  Result := ClientRadio.Checked;
+end;
+
+function ShouldInstallBackend: Boolean;
+begin
+  Result := not ClientRadio.Checked;
+end;
 
 function ShouldInstallPostgres: Boolean;
 var
@@ -109,6 +153,14 @@ var
   InstalledVersion: String;
 begin
   Result := True;
+
+  if ClientRadio.Checked then
+  begin
+    Result := False;
+    Log('Modo Cliente: no se instala PostgreSQL.');
+    Exit;
+  end;
+
   PostgresKey := 'SOFTWARE\PostgreSQL Global Development Group\PostgreSQL';
   if RegQueryStringValue(HKLM64, PostgresKey, 'Version', InstalledVersion) or
      RegQueryStringValue(HKLM32, PostgresKey, 'Version', InstalledVersion) then
@@ -132,12 +184,14 @@ var
   AdminPass: String;
 begin
   if AutoModeRadio.Checked then
-    AdminPass := 'postgres'
+    AdminPass := PgAdminPassAutoMode.Text
   else
     AdminPass := PgAdminPass.Text;
 
   Result := '--mode unattended --unattendedmodeui minimal --disable-components stackbuilder --superpassword "' + AdminPass + '"';
 end;
+
+{ ── Random password generator ───────────────────────────────────────────── }
 
 function WinGetTickCount: DWord; external 'GetTickCount@kernel32.dll stdcall';
 
@@ -170,9 +224,115 @@ begin
   end;
 end;
 
+function GetAutoAppPass: String;
+begin
+  if AutoAppPass = '' then
+    AutoAppPass := GenerateRandomPassword(16);
+  Result := AutoAppPass;
+end;
+
+{ ── Page creation ────────────────────────────────────────────────────────── }
+
+procedure CreateInstallModePage;
+begin
+  InstallModePage := CreateCustomPage(wpSelectDir,
+    'Modo de Instalación',
+    'Seleccione el tipo de instalación según el rol de este equipo.');
+
+  StandaloneRadio := TRadioButton.Create(InstallModePage);
+  StandaloneRadio.Caption := 'Standalone (todo en un solo equipo)';
+  StandaloneRadio.Font.Style := [fsBold];
+  StandaloneRadio.Top := 16;
+  StandaloneRadio.Left := 10;
+  StandaloneRadio.Width := 420;
+  StandaloneRadio.Checked := True;
+  StandaloneRadio.Parent := InstallModePage.Surface;
+
+  StandaloneLabel := TLabel.Create(InstallModePage);
+  StandaloneLabel.Caption :=
+    'Instala todo: Electron, backend .NET, PostgreSQL y servicios.' + #13#10 +
+    'Ideal para negocios pequeños con una sola caja.';
+  StandaloneLabel.Top := 34;
+  StandaloneLabel.Left := 30;
+  StandaloneLabel.Width := 400;
+  StandaloneLabel.Height := 30;
+  StandaloneLabel.Parent := InstallModePage.Surface;
+
+  ServerRadio := TRadioButton.Create(InstallModePage);
+  ServerRadio.Caption := 'Servidor (base de datos + API central)';
+  ServerRadio.Font.Style := [fsBold];
+  ServerRadio.Top := 80;
+  ServerRadio.Left := 10;
+  ServerRadio.Width := 420;
+  ServerRadio.Parent := InstallModePage.Surface;
+
+  ServerLabel := TLabel.Create(InstallModePage);
+  ServerLabel.Caption :=
+    'Instala el backend, PostgreSQL y la interfaz de administración.' + #13#10 +
+    'Este equipo será el servidor central al que se conectarán los clientes.';
+  ServerLabel.Top := 98;
+  ServerLabel.Left := 30;
+  ServerLabel.Width := 400;
+  ServerLabel.Height := 30;
+  ServerLabel.Parent := InstallModePage.Surface;
+
+  ClientRadio := TRadioButton.Create(InstallModePage);
+  ClientRadio.Caption := 'Cliente (caja o punto de venta remoto)';
+  ClientRadio.Font.Style := [fsBold];
+  ClientRadio.Top := 144;
+  ClientRadio.Left := 10;
+  ClientRadio.Width := 420;
+  ClientRadio.Parent := InstallModePage.Surface;
+
+  ClientLabel := TLabel.Create(InstallModePage);
+  ClientLabel.Caption :=
+    'Instala únicamente Electron. Se conecta al servidor Kairo en la red local.' + #13#10 +
+    'No instala PostgreSQL ni el backend — requiere un servidor activo.';
+  ClientLabel.Top := 162;
+  ClientLabel.Left := 30;
+  ClientLabel.Width := 400;
+  ClientLabel.Height := 30;
+  ClientLabel.Parent := InstallModePage.Surface;
+end;
+
+procedure CreateClientConfigPage;
+begin
+  ClientConfigPage := CreateCustomPage(InstallModePage.ID,
+    'Conexión al Servidor',
+    'Ingresa la dirección IP del servidor Kairo en tu red local.');
+
+  ServerIpLabel := TLabel.Create(ClientConfigPage);
+  ServerIpLabel.Caption := 'Dirección IP del servidor:';
+  ServerIpLabel.Top := 20;
+  ServerIpLabel.Left := 0;
+  ServerIpLabel.Parent := ClientConfigPage.Surface;
+
+  ServerIpEdit := TEdit.Create(ClientConfigPage);
+  ServerIpEdit.Text := '192.168.1.';
+  ServerIpEdit.Top := 38;
+  ServerIpEdit.Left := 0;
+  ServerIpEdit.Width := 220;
+  ServerIpEdit.Parent := ClientConfigPage.Surface;
+
+  ServerIpNote := TLabel.Create(ClientConfigPage);
+  ServerIpNote.Caption :=
+    'Ejemplo: 192.168.1.50' + #13#10 + #13#10 +
+    'Puedes encontrar la IP del servidor en:' + #13#10 +
+    '  • El equipo servidor → ejecuta "ipconfig" en CMD' + #13#10 +
+    '  • El panel de administración de tu router' + #13#10 + #13#10 +
+    'El cliente se conectará en: http://[IP]:8855';
+  ServerIpNote.Top := 74;
+  ServerIpNote.Left := 0;
+  ServerIpNote.Width := 420;
+  ServerIpNote.AutoSize := False;
+  ServerIpNote.Height := 120;
+  ServerIpNote.Parent := ClientConfigPage.Surface;
+end;
+
 procedure CreatePgModePage;
 begin
-  PgModePage := CreateCustomPage(wpSelectDir, 'Modo de Configuración de Base de Datos',
+  PgModePage := CreateCustomPage(ClientConfigPage.ID,
+    'Modo de Configuración de Base de Datos',
     'Elige cómo deseas configurar la base de datos PostgreSQL.');
 
   AutoModeRadio := TRadioButton.Create(PgModePage);
@@ -185,31 +345,56 @@ begin
   AutoModeRadio.Parent := PgModePage.Surface;
 
   AutoModeLabel := TLabel.Create(PgModePage);
-  AutoModeLabel.Caption := 'Configura PostgreSQL con valores seguros automáticos.' + #13#10 +
-    'Se creará la base de datos "KAIRO_DB" y el usuario "kairo_user"' + #13#10 +
-    'con una contraseña segura generada automáticamente.';
-  AutoModeLabel.Top := 40;
+  AutoModeLabel.Caption :=
+    'Configura PostgreSQL automáticamente.' + #13#10 +
+    'Se crean la base "KAIRO_DB" y el usuario "kairo_user" con contraseña segura.';
+  AutoModeLabel.Top := 38;
   AutoModeLabel.Left := 30;
   AutoModeLabel.Width := 400;
-  AutoModeLabel.Height := 50;
+  AutoModeLabel.Height := 28;
   AutoModeLabel.Parent := PgModePage.Surface;
+
+  PgAdminPassAutoModeLabel := TLabel.Create(PgModePage);
+  PgAdminPassAutoModeLabel.Caption := 'Contraseña del administrador PostgreSQL (usuario postgres):';
+  PgAdminPassAutoModeLabel.Top := 72;
+  PgAdminPassAutoModeLabel.Left := 30;
+  PgAdminPassAutoModeLabel.Width := 380;
+  PgAdminPassAutoModeLabel.Parent := PgModePage.Surface;
+
+  PgAdminPassAutoMode := TEdit.Create(PgModePage);
+  PgAdminPassAutoMode.PasswordChar := '*';
+  PgAdminPassAutoMode.Text := '';
+  PgAdminPassAutoMode.Top := 90;
+  PgAdminPassAutoMode.Left := 30;
+  PgAdminPassAutoMode.Width := 250;
+  PgAdminPassAutoMode.Parent := PgModePage.Surface;
+
+  PgAdminPassAutoModeNote := TLabel.Create(PgModePage);
+  PgAdminPassAutoModeNote.Caption :=
+    'Primera instalacion: define la contrasena del superusuario postgres.' + #13#10 +
+    'PostgreSQL ya instalado: ingresa tu contrasena actual de postgres.';
+  PgAdminPassAutoModeNote.Top := 115;
+  PgAdminPassAutoModeNote.Left := 30;
+  PgAdminPassAutoModeNote.Width := 380;
+  PgAdminPassAutoModeNote.Height := 28;
+  PgAdminPassAutoModeNote.Parent := PgModePage.Surface;
 
   CustomModeRadio := TRadioButton.Create(PgModePage);
   CustomModeRadio.Caption := 'Modo personalizado (avanzado)';
   CustomModeRadio.Font.Style := [fsBold];
-  CustomModeRadio.Top := 100;
+  CustomModeRadio.Top := 152;
   CustomModeRadio.Left := 10;
   CustomModeRadio.Width := 400;
   CustomModeRadio.Parent := PgModePage.Surface;
 
   CustomModeLabel := TLabel.Create(PgModePage);
-  CustomModeLabel.Caption := 'Permite especificar manualmente las credenciales del' + #13#10 +
-    'administrador (postgres) y los detalles de la base de datos' + #13#10 +
-    'y el usuario que utilizará la aplicación.';
-  CustomModeLabel.Top := 120;
+  CustomModeLabel.Caption :=
+    'Permite especificar manualmente las credenciales del' + #13#10 +
+    'administrador y los detalles de la base de datos y usuario de la aplicacion.';
+  CustomModeLabel.Top := 170;
   CustomModeLabel.Left := 30;
   CustomModeLabel.Width := 400;
-  CustomModeLabel.Height := 50;
+  CustomModeLabel.Height := 30;
   CustomModeLabel.Parent := PgModePage.Surface;
 end;
 
@@ -218,13 +403,12 @@ begin
   PgConfigPage := CreateCustomPage(PgModePage.ID, 'Configuración Personalizada de PostgreSQL',
     'Ingresa las credenciales de administrador y de la aplicación.');
 
-  // --- Fila 1: Host y Puerto ---
   PgHostLabel := TLabel.Create(PgConfigPage);
   PgHostLabel.Caption := 'Host:';
   PgHostLabel.Top := 10;
   PgHostLabel.Left := 0;
   PgHostLabel.Parent := PgConfigPage.Surface;
-  
+
   PgHost := TEdit.Create(PgConfigPage);
   PgHost.Text := 'localhost';
   PgHost.Top := 28;
@@ -237,7 +421,7 @@ begin
   PgPortLabel.Top := 10;
   PgPortLabel.Left := 200;
   PgPortLabel.Parent := PgConfigPage.Surface;
-  
+
   PgPort := TEdit.Create(PgConfigPage);
   PgPort.Text := '5432';
   PgPort.Top := 28;
@@ -245,13 +429,12 @@ begin
   PgPort.Width := 80;
   PgPort.Parent := PgConfigPage.Surface;
 
-  // --- Fila 2: Administrador PostgreSQL ---
   PgAdminUserLabel := TLabel.Create(PgConfigPage);
   PgAdminUserLabel.Caption := 'Admin PostgreSQL (Usuario):';
   PgAdminUserLabel.Top := 65;
   PgAdminUserLabel.Left := 0;
   PgAdminUserLabel.Parent := PgConfigPage.Surface;
-  
+
   PgAdminUser := TEdit.Create(PgConfigPage);
   PgAdminUser.Text := 'postgres';
   PgAdminUser.Top := 83;
@@ -264,7 +447,7 @@ begin
   PgAdminPassLabel.Top := 65;
   PgAdminPassLabel.Left := 200;
   PgAdminPassLabel.Parent := PgConfigPage.Surface;
-  
+
   PgAdminPass := TEdit.Create(PgConfigPage);
   PgAdminPass.PasswordChar := '*';
   PgAdminPass.Text := '';
@@ -273,13 +456,12 @@ begin
   PgAdminPass.Width := 180;
   PgAdminPass.Parent := PgConfigPage.Surface;
 
-  // --- Fila 3: Base de Datos de Aplicación ---
   PgDbNameLabel := TLabel.Create(PgConfigPage);
   PgDbNameLabel.Caption := 'Nombre de Base de Datos:';
   PgDbNameLabel.Top := 120;
   PgDbNameLabel.Left := 0;
   PgDbNameLabel.Parent := PgConfigPage.Surface;
-  
+
   PgDbName := TEdit.Create(PgConfigPage);
   PgDbName.Text := 'KAIRO_DB';
   PgDbName.Top := 138;
@@ -287,13 +469,12 @@ begin
   PgDbName.Width := 180;
   PgDbName.Parent := PgConfigPage.Surface;
 
-  // --- Fila 4: Credenciales de Aplicación ---
   PgAppUserLabel := TLabel.Create(PgConfigPage);
   PgAppUserLabel.Caption := 'Usuario de la Aplicación:';
   PgAppUserLabel.Top := 175;
   PgAppUserLabel.Left := 0;
   PgAppUserLabel.Parent := PgConfigPage.Surface;
-  
+
   PgAppUser := TEdit.Create(PgConfigPage);
   PgAppUser.Text := 'kairo_user';
   PgAppUser.Top := 193;
@@ -306,7 +487,7 @@ begin
   PgAppPassLabel.Top := 175;
   PgAppPassLabel.Left := 200;
   PgAppPassLabel.Parent := PgConfigPage.Surface;
-  
+
   PgAppPass := TEdit.Create(PgConfigPage);
   PgAppPass.PasswordChar := '*';
   PgAppPass.Text := '';
@@ -354,23 +535,65 @@ end;
 procedure InitializeWizard;
 begin
   InitRand;
+  CreateInstallModePage;
+  CreateClientConfigPage;
   CreatePgModePage;
   CreatePgConfigPage;
   CreateUpdateServerPage;
 end;
 
+{ ── Page navigation ──────────────────────────────────────────────────────── }
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  if PageID = PgConfigPage.ID then
+
+  { Client mode: skip all DB and update server pages }
+  if ClientRadio.Checked then
   begin
-    Result := AutoModeRadio.Checked;
+    if (PageID = PgModePage.ID) or
+       (PageID = PgConfigPage.ID) or
+       (PageID = UpdatePage.ID) then
+      Result := True;
+    Exit;
   end;
+
+  { Non-client modes: skip the client server URL page }
+  if PageID = ClientConfigPage.ID then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  { Auto DB mode: skip the custom credentials page }
+  if PageID = PgConfigPage.ID then
+    Result := AutoModeRadio.Checked;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+
+  if CurPageID = ClientConfigPage.ID then
+  begin
+    if Trim(ServerIpEdit.Text) = '' then
+    begin
+      MsgBox('Por favor ingresa la dirección IP del servidor.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+  end;
+
+  if CurPageID = PgModePage.ID then
+  begin
+    if AutoModeRadio.Checked and (Trim(PgAdminPassAutoMode.Text) = '') then
+    begin
+      MsgBox('Por favor ingresa la contraseña del administrador de PostgreSQL.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+  end;
+
   if CurPageID = PgConfigPage.ID then
   begin
     if Trim(PgHost.Text) = '' then
@@ -411,6 +634,8 @@ begin
   end;
 end;
 
+{ ── Post-install file writers ────────────────────────────────────────────── }
+
 procedure WriteVersionJson;
 var
   VersionPath: String;
@@ -439,6 +664,7 @@ var
   Host, Port, DbName, AppUser, AppPass, AdminUser, AdminPass: String;
   ConnString: String;
   StoragePath: String;
+  LanMode: String;
   JsonContent: String;
 begin
   SettingsPath := ExpandConstant('{app}\api\appsettings.json');
@@ -451,9 +677,9 @@ begin
     Port := '5432';
     DbName := 'KAIRO_DB';
     AppUser := 'kairo_user';
-    AppPass := GenerateRandomPassword(16);
+    AppPass := GetAutoAppPass;
     AdminUser := 'postgres';
-    AdminPass := 'postgres';
+    AdminPass := PgAdminPassAutoMode.Text;
   end
   else
   begin
@@ -470,6 +696,12 @@ begin
     + ';Database=' + DbName + ';Username=' + AppUser
     + ';Password=' + AppPass;
 
+  { Server mode: enable LanMode so clients on the LAN can connect }
+  if ServerRadio.Checked then
+    LanMode := 'true'
+  else
+    LanMode := 'false';
+
   JsonContent :=
     '{' + #13#10 +
     '  "ConnectionStrings": {' + #13#10 +
@@ -482,7 +714,7 @@ begin
     '    "Password": "' + AdminPass + '"' + #13#10 +
     '  },' + #13#10 +
     '  "DatabaseSettings": {' + #13#10 +
-    '    "TimeZone": "America/Tegucigalpa"' + #13#10 +
+    '    "TimeZone": "America/Tegucigalda"' + #13#10 +
     '  },' + #13#10 +
     '  "Logging": {' + #13#10 +
     '    "LogLevel": {' + #13#10 +
@@ -501,6 +733,7 @@ begin
     '  },' + #13#10 +
     '  "AllowedHosts": "*",' + #13#10 +
     '  "SettingsCors": {' + #13#10 +
+    '    "LanMode": ' + LanMode + ',' + #13#10 +
     '    "AllowedOrigins": [ "http://localhost:8855", "http://localhost:5173" ]' + #13#10 +
     '  },' + #13#10 +
     '  "CacheSettings": {' + #13#10 +
@@ -523,11 +756,106 @@ begin
   SaveStringToFile(SettingsPath, JsonContent, False);
 end;
 
+procedure WriteInstallConfig;
+var
+  ConfigPath: String;
+  Mode: String;
+  ServerUrl: String;
+  JsonContent: String;
+begin
+  ConfigPath := ExpandConstant('{app}\kairo-install.json');
+
+  if ClientRadio.Checked then
+  begin
+    Mode := 'client';
+    ServerUrl := 'http://' + Trim(ServerIpEdit.Text) + ':8855';
+    JsonContent :=
+      '{' + #13#10 +
+      '  "mode": "' + Mode + '",' + #13#10 +
+      '  "serverUrl": "' + ServerUrl + '"' + #13#10 +
+      '}';
+  end
+  else if ServerRadio.Checked then
+  begin
+    Mode := 'server';
+    JsonContent :=
+      '{' + #13#10 +
+      '  "mode": "' + Mode + '"' + #13#10 +
+      '}';
+  end
+  else
+  begin
+    Mode := 'standalone';
+    JsonContent :=
+      '{' + #13#10 +
+      '  "mode": "' + Mode + '"' + #13#10 +
+      '}';
+  end;
+
+  SaveStringToFile(ConfigPath, JsonContent, False);
+  Log('kairo-install.json escrito: mode=' + Mode);
+end;
+
+procedure OpenFirewallPort;
+var
+  ResultCode: Integer;
+begin
+  Exec('netsh',
+    'advfirewall firewall add rule name="Kairo POS API" dir=in action=allow protocol=TCP localport=8855',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log('Firewall: regla agregada para puerto 8855, resultado: ' + IntToStr(ResultCode));
+end;
+
+procedure WriteCredentialsFile;
+var
+  CredPath: String;
+  Content: String;
+begin
+  CredPath := ExpandConstant('{commonappdata}\KairoPOS\admin_credentials.txt');
+  Content :=
+    '===== Kairo POS — Credenciales de la Aplicacion =====' + #13#10 +
+    'Guarda este archivo en un lugar seguro.' + #13#10 + #13#10 +
+    'Usuario de la Aplicacion (uso diario y acceso en pgAdmin):' + #13#10 +
+    '  Host      : localhost' + #13#10 +
+    '  Puerto    : 5432' + #13#10 +
+    '  Base datos: KAIRO_DB' + #13#10 +
+    '  Usuario   : kairo_user' + #13#10 +
+    '  Contrasena: ' + GetAutoAppPass + #13#10 + #13#10 +
+    'Como conectarte en pgAdmin:' + #13#10 +
+    '  1. Abre pgAdmin' + #13#10 +
+    '  2. Agrega un nuevo servidor (Add New Server)' + #13#10 +
+    '  3. En Connection: usa los datos de arriba' + #13#10 +
+    '  4. Solo veras la base de datos KAIRO_DB' + #13#10 + #13#10 +
+    'NOTA: La contrasena del superusuario "postgres" es la que' + #13#10 +
+    'definiste durante la instalacion. Guardala por separado.' + #13#10;
+  SaveStringToFile(CredPath, Content, False);
+  Log('Credenciales de kairo_user guardadas en: ' + CredPath);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    WriteAppSettings;
-    WriteVersionJson;
+    WriteInstallConfig;
+    if not ClientRadio.Checked then
+    begin
+      WriteAppSettings;
+      WriteVersionJson;
+      if AutoModeRadio.Checked then
+        WriteCredentialsFile;
+    end;
+    if ServerRadio.Checked then
+      OpenFirewallPort;
+  end;
+
+  if CurStep = ssDone then
+  begin
+    if (not ClientRadio.Checked) and AutoModeRadio.Checked then
+      MsgBox(
+        'Instalacion completada.' + #13#10 + #13#10 +
+        'Se generaron credenciales unicas para PostgreSQL.' + #13#10 +
+        'Guardalas en un lugar seguro:' + #13#10 + #13#10 +
+        'C:\ProgramData\KairoPOS\admin_credentials.txt',
+        mbInformation, MB_OK);
   end;
 end;

@@ -109,7 +109,7 @@ dotnet publish -c Release -o "bin\Release\net8.0\publish" -r win-x64 --self-cont
 set "BACKEND_ZIP=%OUTPUT%\backend.zip"
 set "BACKEND_PUBLISH=%BACKEND%\bin\Release\net8.0\publish"
 if exist "%BACKEND_ZIP%" del "%BACKEND_ZIP%"
-powershell -NoProfile -Command "Get-ChildItem '%BACKEND_PUBLISH%' -Exclude 'appsettings*.json','web.config' -Recurse | Compress-Archive -DestinationPath '%BACKEND_ZIP%' -Force"
+powershell -NoProfile -Command "Compress-Archive -Path '%BACKEND_PUBLISH%\*' -DestinationPath '%BACKEND_ZIP%' -Force"
 echo [OK] backend.zip
 
 :: 4. Compilar Instalador
