@@ -5,7 +5,7 @@
     "name": "Kairo POS",
     "version": "1.0.0-alpha.1",
     "channel": "alpha",
-    "release_date": "2026-06-21T23:18:51Z"
+    "release_date": "2026-06-22T05:40:26Z"
   },
   "distribution": {
     "provider": "github_releases",
@@ -14,15 +14,15 @@
   "files": {
     "installer": {
       "name": "KairoSetup.exe",
-      "sha256": "92dc80002b5851b4a903d555ed314712a996e2d21ee1ffcab575b235caea8d6c"
+      "sha256": "122a2235c3f0bed183e0e635c6318d4f43c13f95ac72fa58660a4330c4ded522"
     },
     "frontend": {
       "name": "frontend.zip",
-      "sha256": "153611979b36354b969e2a3303f5e22a588a769ed5e59035461f0292f9fa6653"
+      "sha256": "7fc689f80885ef1b1ef30c9742d1c7534a267bddcad5ddaf634c47e8a144fe9c"
     },
     "backend": {
       "name": "backend.zip",
-      "sha256": "05a8e3e02c9b60e914ffc57a6b65a486226985fa5c85510073cfdd49a5d59c3e"
+      "sha256": "0cef934f00309f6f78f25feecaff0342551343f5c0000a4e49af5e35232a353a"
     }
   },
   "update_policy": {
