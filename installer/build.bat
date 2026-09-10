@@ -10,22 +10,29 @@ set "ROOT=%~dp0..\.."
 set "FRONTEND=%ROOT%\acg-web"
 set "BACKEND=%ROOT%\enlip-services\ENLIPWebApi"
 set "INSTALLER=%~dp0"
-if "%INSTALLER:~-1%"=="\" set "INSTALLER=%INSTALLER=%
+if "%INSTALLER:~-1%"=="\" set "INSTALLER=%INSTALLER:~0,-1%"
 
 :: 0. Leer Configuración y determinar versión SemVer resuelta (localOnly)
-for /f "tokens=*" %%V in ('powershell -NoProfile -Command "(Get-Content 'version.json' | ConvertFrom-Json).version"') do set "VERSION=%%V"
-for /f "tokens=*" %%C in ('powershell -NoProfile -Command "(Get-Content 'version.json' | ConvertFrom-Json).channel"') do set "CHANNEL=%%C"
+for /f "tokens=*" %%V in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json).version"') do set "VERSION=%%V"
+for /f "tokens=*" %%C in ('powershell -NoProfile -Command "(Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json).channel"') do set "CHANNEL=%%C"
 
 set "FULL_VERSION="
 for /f "tokens=*" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%\get-version.ps1" -version "%VERSION%" -channel "%CHANNEL%" -localOnly') do set "FULL_VERSION=%%F"
 if "%FULL_VERSION%"=="" (
     echo [ERROR] No se pudo determinar la version o el tag ya existe.
+    pause
     exit /b 1
 )
 
 :: Hacer copia de seguridad de version.json y sobrescribir temporalmente con la versión resuelta
 copy /y "%INSTALLER%\version.json" "%INSTALLER%\version.json.bak" >nul
 powershell -NoProfile -Command "$json = Get-Content '%INSTALLER%\version.json' | ConvertFrom-Json; $json.version = '%FULL_VERSION%'; $json | ConvertTo-Json -Depth 10 | Set-Content '%INSTALLER%\version.json'"
+
+:: Verificar que kairo-updater.exe exista en assets
+if not exist "%INSTALLER%\assets\kairo-updater\kairo-updater.exe" (
+    echo [INFO] kairo-updater.exe no encontrado en assets. Compilando automaticamente...
+    call "%ROOT%\kairo-desktop\updater\build-updater.bat"
+)
 
 echo Version Base: %VERSION% (%CHANNEL%)
 echo Version Compilada (SemVer): %FULL_VERSION%
@@ -43,9 +50,15 @@ if exist "release" (
 )
 
 call pnpm run build:electron
+if !ERRORLEVEL! NEQ 0 (
+    echo [ERROR] Fallo la compilacion del frontend.
+    call :restore_version
+    pause
+    exit /b 1
+)
 
 :: Obtener nombre del producto/ejecutable desde package.json
-for /f "tokens=*" %%P in ('powershell -NoProfile -Command "(Get-Content 'package.json' | ConvertFrom-Json).build.productName"') do set "PRODUCT_NAME=%%P"
+for /f "tokens=*" %%P in ('powershell -NoProfile -Command "(Get-Content '%FRONTEND%\package.json' | ConvertFrom-Json).build.productName"') do set "PRODUCT_NAME=%%P"
 if "!PRODUCT_NAME!"=="" set "PRODUCT_NAME=KAIRO POs"
 
 set "EXE_PATH=release\win-unpacked\!PRODUCT_NAME!.exe"
@@ -55,6 +68,7 @@ if not exist "!EXE_PATH!" (
     echo [ERROR] No se genero el ejecutable '!PRODUCT_NAME!.exe' en release\win-unpacked.
     echo Revisa el log de electron-builder para ver detalles del fallo.
     call :restore_version
+    pause
     exit /b 1
 )
 
@@ -62,6 +76,7 @@ if not exist "!ASAR_PATH!" (
     echo [ERROR] No se genero el recurso 'resources\app.asar' en release\win-unpacked.
     echo Revisa el log de electron-builder para ver detalles del fallo.
     call :restore_version
+    pause
     exit /b 1
 )
 
@@ -81,9 +96,10 @@ if exist "bin\Release\net8.0\publish" (
 )
 
 dotnet publish -c Release -o "bin\Release\net8.0\publish" -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-if %ERRORLEVEL% NEQ 0 (
+if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Fallo el publish del backend.
     call :restore_version
+    pause
     exit /b 1
 )
 echo [OK] Backend publicado en: %BACKEND%\bin\Release\net8.0\publish\
@@ -103,7 +119,15 @@ if exist "output" (
 :: Ruta de ISCC
 set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
 if not exist "!ISCC!" (
-    echo [ERROR] No se encontro ISCC.exe en: !ISCC!
+    set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+)
+if not exist "!ISCC!" (
+    for /f "tokens=*" %%I in ('where iscc.exe 2^>nul') do set "ISCC=%%I"
+)
+if not exist "!ISCC!" (
+    echo [ERROR] No se encontro ISCC.exe. Asegurate de tener Inno Setup 6 instalado.
+    call :restore_version
+    pause
     exit /b 1
 )
 echo [INFO] Usando: !ISCC!
@@ -112,6 +136,7 @@ echo [INFO] Usando: !ISCC!
 if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Fallo la compilacion del instalador.
     call :restore_version
+    pause
     exit /b 1
 )
 
