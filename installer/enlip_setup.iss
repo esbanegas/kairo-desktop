@@ -8,7 +8,7 @@
   #define AppVersion   "1.0.0"
 #endif
 #ifndef AppChannel
-  #define AppChannel   "stable"
+  #define AppChannel   "production"
 #endif
 #define AppPublisher "KAIRO"
 #define AppId        "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
@@ -806,6 +806,24 @@ begin
   Log('Firewall: regla agregada para puerto 8855, resultado: ' + IntToStr(ResultCode));
 end;
 
+procedure LockDownFileToAdmins(const FilePath: String);
+var
+  ResultCode: Integer;
+begin
+  { ProgramData hereda un ACL que da lectura al grupo "Users" por defecto,
+    lo que expondria la contrasena en texto plano a cualquier cuenta local
+    de Windows. Se quita la herencia y se otorga acceso unicamente a
+    Administradores (S-1-5-32-544) y SYSTEM (S-1-5-18) - SIDs "well-known",
+    validos en cualquier idioma de Windows. }
+  Exec('icacls.exe',
+    '"' + FilePath + '" /inheritance:r /grant:r "*S-1-5-32-544:(F)" /grant:r "*S-1-5-18:(F)"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode <> 0 then
+    Log('ADVERTENCIA: No se pudieron restringir permisos de ' + FilePath + ' (icacls exit code ' + IntToStr(ResultCode) + ').')
+  else
+    Log('Permisos restringidos a Administradores/SYSTEM: ' + FilePath);
+end;
+
 procedure WriteCredentialsFile;
 var
   CredPath: String;
@@ -829,6 +847,7 @@ begin
     'NOTA: La contrasena del superusuario "postgres" es la que' + #13#10 +
     'definiste durante la instalacion. Guardala por separado.' + #13#10;
   SaveStringToFile(CredPath, Content, False);
+  LockDownFileToAdmins(CredPath);
   Log('Credenciales de kairo_user guardadas en: ' + CredPath);
 end;
 

@@ -187,7 +187,7 @@ if (success && !string.IsNullOrEmpty(script.VersionJsonPath) && File.Exists(scri
         var mutable = dict.ToDictionary(k => k.Key, v => (object)v.Value.GetRawText().Trim('"'));
 
         mutable["version"]    = script.Version;
-        mutable["channel"]    = script.Channel ?? "stable";
+        mutable["channel"]    = script.Channel ?? "production";
 
         File.WriteAllText(script.VersionJsonPath,
             JsonSerializer.Serialize(mutable, new JsonSerializerOptions { WriteIndented = true }));
