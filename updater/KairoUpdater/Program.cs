@@ -92,6 +92,37 @@ if (targetPid > 0)
     }
 }
 
+// ── Wait for the backend to actually die ─────────────────────────────────────
+// Electron llama a stopBackend() (taskkill /IM ENLIPWebApi.exe /F) antes de
+// lanzar este updater, pero taskkill retorna cuando SOLICITA la terminacion, no
+// cuando Windows ya libero los handles. ENLIPWebApi.exe pesa ~148 MB: si todavia
+// esta abierto cuando extraemos backend.zip encima, ExtractToFile lanza
+// excepcion, se hace rollback y la actualizacion no se aplica.
+// Se espera al nombre del proceso (no a un PID) a proposito: el backend se lanza
+// detached y puede haber sobrevivido a una sesion anterior de Electron, asi que
+// este updater no conoce su PID.
+const string BackendProcessName = "ENLIPWebApi";
+var backendWait = Stopwatch.StartNew();
+while (backendWait.ElapsedMilliseconds < 20_000)
+{
+    var running = Process.GetProcessesByName(BackendProcessName);
+    if (running.Length == 0) break;
+    foreach (var p in running) p.Dispose();
+    Log($"Waiting for {BackendProcessName}.exe to exit...");
+    await Task.Delay(1000);
+}
+foreach (var stubborn in Process.GetProcessesByName(BackendProcessName))
+{
+    try
+    {
+        Log($"WARNING: {BackendProcessName}.exe still running after 20s. Forcing kill...");
+        stubborn.Kill(true);
+        stubborn.WaitForExit(5000);
+    }
+    catch (Exception ex) { Log($"WARNING: could not kill {BackendProcessName}.exe: {ex.Message}"); }
+    finally { stubborn.Dispose(); }
+}
+
 await Task.Delay(1000); // extra buffer for file handles to release
 
 // ── Create backup of current binaries ────────────────────────────────────────
@@ -130,6 +161,7 @@ foreach (var pkg in script.Packages)
 
 // ── Apply packages ────────────────────────────────────────────────────────────
 bool success = true;
+string? failureReason = null;
 
 foreach (var pkg in script.Packages)
 {
@@ -173,6 +205,7 @@ foreach (var pkg in script.Packages)
     {
         Log($"  ERROR applying {pkg.Name}: {ex.Message}");
         success = false;
+        failureReason = $"No se pudo aplicar el paquete '{pkg.Name}': {ex.Message}";
         break;
     }
 }
@@ -235,7 +268,33 @@ if (!success)
     }
 }
 
+// ── Report the outcome back to the app ────────────────────────────────────────
+// La app se relanza SIEMPRE, con o sin exito: dejar al usuario sin Kairo seria
+// peor que dejarlo con la version anterior. Pero relanzar en silencio hace que
+// una actualizacion fallida se vea EXACTAMENTE igual que una exitosa — el
+// usuario cree que actualizo y solo el log dice lo contrario. Este archivo es
+// el canal para que Electron lo detecte al arrancar y lo muestre.
+try
+{
+    var resultPath = Path.Combine(Path.GetDirectoryName(scriptPath)!, "update-result.json");
+    var payload = new Dictionary<string, object?>
+    {
+        ["success"] = success,
+        ["version"] = script.Version,
+        ["timestamp"] = DateTime.UtcNow.ToString("o"),
+        ["error"] = failureReason,
+        ["logPath"] = logPath,
+    };
+    File.WriteAllText(resultPath, JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
+    Log($"Resultado escrito en: {resultPath}");
+}
+catch (Exception ex)
+{
+    Log($"WARNING: no se pudo escribir update-result.json: {ex.Message}");
+}
+
 // ── Clean up download temp files ──────────────────────────────────────────────
+// No se borra update-result.json: lo consume Electron en el proximo arranque.
 try
 {
     if (File.Exists(scriptPath)) File.Delete(scriptPath);

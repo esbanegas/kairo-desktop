@@ -256,9 +256,57 @@ if !ERRORLEVEL! NEQ 0 (
 )
 set "BACKEND_ZIP=%OUTPUT%\backend.zip"
 set "BACKEND_PUBLISH=%BACKEND%\bin\Release\net8.0\publish"
+set "BACKEND_STAGE=%OUTPUT%\_backend_stage"
 if exist "%BACKEND_ZIP%" del "%BACKEND_ZIP%"
-powershell -NoProfile -Command "Compress-Archive -Path '%BACKEND_PUBLISH%\*' -DestinationPath '%BACKEND_ZIP%' -Force"
-echo [OK] backend.zip
+if exist "%BACKEND_STAGE%" rmdir /s /q "%BACKEND_STAGE%"
+
+REM ============================================================================
+REM backend.zip debe contener EXACTAMENTE lo que instala enlip_setup.iss.
+REM
+REM Antes se comprimia la carpeta publish completa (Compress-Archive no sabe
+REM excluir), mientras que el instalador si excluye. El resultado: los archivos
+REM que la instalacion nunca pone, la PRIMERA actualizacion automatica si los
+REM ponia. Entre ellos appsettings.ProductionACG.json, que lleva credenciales
+REM reales de la base de datos y del storage de produccion - y backend.zip es
+REM un asset publico de GitHub Releases.
+REM
+REM Las exclusiones deben mantenerse en sintonia con el "Excludes:" de la
+REM seccion [Files] de enlip_setup.iss:
+REM   *.pdb            -> simbolos de depuracion, inutiles en el cliente
+REM   appsettings*.json-> configuracion; la del cliente la escribe el instalador
+REM                       (WriteAppSettings) y NUNCA debe sobrescribirse. Al no
+REM                       viajar en el zip, el mecanismo "protected" del updater
+REM                       queda como segunda linea de defensa, no como la unica.
+REM   web.config       -> solo aplica a IIS; el desktop hospeda con Kestrel
+REM Se conservan a proposito ENLIPWebApi.xml (doc XML que si instala el .iss),
+REM References\ y wwwroot\.
+REM
+REM Se usa una carpeta de staging porque Compress-Archive no tiene exclusiones
+REM y, al pasarle una lista de archivos, aplana la estructura de directorios.
+REM ============================================================================
+robocopy "%BACKEND_PUBLISH%" "%BACKEND_STAGE%" /E /NFL /NDL /NJH /NJS /NP /NS /NC ^
+  /XF *.pdb appsettings*.json web.config >nul
+REM robocopy usa codigos 0-7 para exito (8+ es error real), al reves de lo normal.
+if !ERRORLEVEL! GEQ 8 (
+    echo [ERROR] Fallo al preparar el contenido de backend.zip ^(robocopy !ERRORLEVEL!^).
+    call :restore_version
+    exit /b 1
+)
+
+if not exist "%BACKEND_STAGE%\ENLIPWebApi.exe" (
+    echo [ERROR] El staging de backend.zip no contiene ENLIPWebApi.exe.
+    call :restore_version
+    exit /b 1
+)
+if exist "%BACKEND_STAGE%\appsettings.ProductionACG.json" (
+    echo [ERROR] appsettings.ProductionACG.json llego al staging: la exclusion no funciono.
+    call :restore_version
+    exit /b 1
+)
+
+powershell -NoProfile -Command "Compress-Archive -Path '%BACKEND_STAGE%\*' -DestinationPath '%BACKEND_ZIP%' -Force"
+rmdir /s /q "%BACKEND_STAGE%"
+echo [OK] backend.zip (sin *.pdb, appsettings*.json ni web.config)
 
 REM 4. Compilar Instalador
 echo [3/4] Compilando instalador (Inno Setup)...
