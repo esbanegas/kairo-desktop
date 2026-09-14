@@ -50,6 +50,8 @@ graph TD
 
 El cliente que ya tiene la app instalada **solo descarga `frontend.zip` y `backend.zip`** (~30 MB en total) — no vuelve a descargar los 450+ MB del instalador completo.
 
+> **Para instalar en una PC nueva, lee antes la [sección 12](#12-modelo-de-instalación-quién-ejecuta-el-setup-y-cuándo-se-eleva).** El Setup debe ejecutarlo, con doble clic normal, el usuario que va a operar el POS — de eso depende que las actualizaciones automáticas funcionen después.
+
 ---
 
 ## 4. Manual del desarrollador: cómo lanzar una nueva versión
@@ -204,6 +206,8 @@ Se auditó todo el código de `publish.bat`, `build.bat`, `get-version.ps1`, `bu
 
 **Automatizado**: `pnpm test:version-compare` (en `acg-web`) corre `scripts/test-version-comparison.mjs`, que importa la función real de comparación (`src/updater/versionCompare.js`, sin dependencias de Electron) y verifica la matriz completa: `alpha.2 < alpha.10` (numérico, no de string), `alpha < beta < production` en la misma `X.Y.Z`, no-downgrade en ambas direcciones, misma versión/canal → no hay actualización.
 
+**Modelo de instalación**: `powershell -ExecutionPolicy Bypass -File installer\test-install-model.ps1` — compila el instalador y verifica que siga cumpliendo los tres requisitos de la sección 12 (el Setup no se auto-eleva, `{app}` es escribible sin UAC, PostgreSQL no se lanza desde `[Run]`, los accesos directos son per-user, `[Dirs]` no reescribe ACLs y `kairo-updater.exe` se instala sin `Check` condicional). Incluye la comprobación definitiva: que el manifiesto del `Setup.exe` generado declare `asInvoker`. Con `-SkipCompile` verifica solo el texto del `.iss`, para runners sin Inno Setup.
+
 **Solo lectura, contra GitHub real**: `publish.bat --verify {channel}` (o `verify-manifest.ps1 -channel {channel}` directamente) — confirma consistencia manifest/tag/Release/assets sin publicar ni modificar nada.
 
 **Manual** (requieren un build real o `dev-test-updates.bat`):
@@ -213,3 +217,51 @@ Se auditó todo el código de `publish.bat`, `build.bat`, `get-version.ps1`, `bu
 - SHA-256 incorrecto → `checksum_mismatch`, `kairo-updater.exe` nunca se lanza.
 - Sin internet → error `network` amigable en el chequeo manual; el chequeo silencioso de fondo (30s al arrancar) solo logea, no rompe la app.
 - `dev-test-updates.bat 1.0.1 skip alpha` (o `beta`) levanta un servidor local con el schema de manifiesto correcto para probar todo el flujo sin tocar GitHub.
+
+---
+
+## 12. Modelo de instalación: quién ejecuta el Setup y cuándo se eleva
+
+Kairo se instala **por usuario**, en `%LocalAppData%\Programs\KAIRO POs`, no en Program Files. Esa es la condición para que el auto-updater pueda reemplazar `app.asar` y `api\*` sin pedir UAC en cada actualización.
+
+### Regla principal
+
+> **El Setup se ejecuta como el usuario que va a operar el POS — nunca con "Ejecutar como administrador".**
+
+Si se ejecuta elevado, `%LocalAppData%`, el escritorio, el menú Inicio y la entrada de desinstalación resuelven al perfil de **la cuenta que dio las credenciales UAC** (el supervisor o técnico), no al del cajero. Kairo quedaría instalado en un perfil al que el operador no tiene acceso.
+
+Si el instalador detecta que se está ejecutando elevado, **avisa y muestra la ruta exacta donde instalará**, para que quien esté frente a la pantalla confirme o cancele. No lo bloquea: un administrador instalando para sí mismo está en el caso correcto, y en una PC con UAC deshabilitado cualquier administrador corre siempre elevado.
+
+### Escenario soportado: cajero estándar + supervisor administrador
+
+1. Inicia sesión en Windows **el cajero** (puede ser una cuenta estándar, sin privilegios).
+2. El cajero ejecuta `KairoSetup.exe` con doble clic normal.
+3. Cuando el instalador necesita privilegios, aparece el UAC y **el supervisor teclea sus credenciales** en ese momento.
+4. Kairo queda instalado en el perfil del cajero; PostgreSQL y la regla de firewall quedan a nivel de máquina.
+
+### Cuándo aparece el UAC
+
+Solo dos operaciones de toda la instalación requieren privilegios:
+
+| Operación | Cuándo aparece |
+|---|---|
+| Instalar PostgreSQL | Solo si no hay PostgreSQL ya instalado en la máquina |
+| Abrir el puerto 8855 en el firewall | Solo en modo **Servidor**, y solo si la regla no existe |
+
+Consecuencias prácticas:
+
+- **Modo Cliente → cero prompts de UAC.** No instala PostgreSQL ni toca el firewall.
+- **Modo Standalone en una PC que ya tiene PostgreSQL → cero prompts de UAC.**
+- **Modo Servidor sobre una PC limpia → dos prompts** (uno por operación). No se agrupan en uno solo a propósito: agruparlos obligaría a pasar la contraseña del superusuario de PostgreSQL a través de `cmd.exe`, donde caracteres como `"`, `&`, `^` o `%` se interpretan y romperían la instalación.
+
+Si el supervisor **cancela** el UAC de PostgreSQL, la instalación de Kairo se completa igual y avisa que falta PostgreSQL. Queda recuperable: instálalo aparte y Kairo funcionará, o vuelve a ejecutar el instalador con un administrador disponible.
+
+### Instalaciones anteriores (alpha.8 y previas)
+
+Las versiones hasta `alpha.8` usaban el modelo viejo (Setup elevado), y registraban la desinstalación en `HKLM`. El instalador nuevo detecta esa entrada y **se detiene** pidiendo desinstalar primero. No hay actualización en sitio entre los dos modelos.
+
+Al desinstalar **no se pierden datos**: la base de datos y `C:\ProgramData\KairoPOS` no se tocan.
+
+Justamente porque `C:\ProgramData\KairoPOS` sobrevive, el instalador nuevo **no intenta reescribir sus permisos**. Esa carpeta fue creada por el Setup elevado de alpha.8, así que pertenece a la cuenta administradora y un usuario estándar no puede cambiar su ACL. No hace falta hacerlo: el instalador viejo ya le había dado permiso de modificación a todos los usuarios, así que el cajero puede escribir ahí. En una instalación limpia, el cajero crea la carpeta y queda como propietario. Los dos caminos funcionan sin tocar ningún permiso ni borrar nada.
+
+Si además quedó un `admin_credentials.txt` de alpha.8 (con permisos restringidos a Administradores), el instalador nuevo no puede sobrescribirlo y tampoco lo borra: escribe las credenciales junto a la aplicación, en `%LocalAppData%\Programs\KAIRO POsdmin_credentials.txt`, y lo registra en el log.

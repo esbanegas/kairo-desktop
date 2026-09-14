@@ -4,8 +4,10 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges>
-        <!-- requireAdministrator: necessary to replace files in Program Files -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <!-- asInvoker: {app} now lives under %LocalAppData%\Programs, writable
+             without elevation. Inherits whatever level launched it instead of
+             forcing a UAC prompt on every single auto-update. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

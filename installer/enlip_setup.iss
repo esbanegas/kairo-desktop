@@ -1,4 +1,4 @@
-; ============================================================
+﻿; ============================================================
 ; ENLIP POs — Inno Setup Script
 ; Empaca: Frontend Electron (win-unpacked) + Backend .NET 8
 ; ============================================================
@@ -11,10 +11,24 @@
   #define AppChannel   "production"
 #endif
 #define AppPublisher "KAIRO"
-#define AppId        "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+; El GUID crudo se define aparte porque [Code] necesita construir con el la ruta
+; de la clave de desinstalacion. AppId lo deriva duplicando la llave inicial,
+; que es como Inno escapa un "{" literal. Una sola fuente de verdad: si el GUID
+; cambia, la deteccion de instalaciones previas lo sigue automaticamente.
+#define AppIdRaw     "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+#define AppId        "{{" + AppIdRaw + "}"
 #define AppExeName   "KAIRO POs.exe"
 #ifndef UpdateServerUrl
   #define UpdateServerUrl "https://raw.githubusercontent.com/esbanegas/kairo-desktop/main/installer/updates"
+#endif
+
+; kairo-updater.exe se valida en tiempo de COMPILACION: si falta, el
+; instalador generado no podria aplicar ninguna actualizacion, asi que es
+; preferible fallar el build a producir un .exe silenciosamente roto.
+; Generalo primero con: updater\build-updater.bat
+#define UpdaterExeSource "assets\kairo-updater\kairo-updater.exe"
+#if !FileExists(AddBackslash(SourcePath) + UpdaterExeSource)
+  #error kairo-updater.exe no encontrado en installer\assets\kairo-updater\. Ejecuta updater\build-updater.bat antes de compilar el instalador.
 #endif
 
 #define FrontendDir  "..\..\acg-web\release\win-unpacked"
@@ -25,7 +39,11 @@ AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\{#AppName}
+; Instalación por-usuario (como VS Code/Discord/Slack), no Program Files:
+; el auto-updater sobrescribe app.asar/api/* sin privilegios elevados solo
+; si {app} es escribible sin UAC. {autopf} (Program Files) lo requeriría en
+; cada actualización; {localappdata}\Programs no, nunca.
+DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 OutputBaseFilename=ENLIP_Setup_v{#AppVersion}
 OutputDir=output
@@ -35,10 +53,45 @@ WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 MinVersion=10.0
-PrivilegesRequired=admin
+; ── Principio del modelo de instalación ────────────────────────────────────
+; El Setup corre SIEMPRE como el usuario que va a operar el POS, nunca
+; elevado; solo las operaciones que de verdad exigen privilegios (instalar
+; PostgreSQL, abrir el puerto en el firewall) se elevan puntualmente desde
+; [Code] con ShellExec('runas', ...).
+;
+; Por qué: un Setup elevado resuelve {localappdata}, {userdesktop} y la clave
+; de desinstalación al perfil de la cuenta que proporcionó las credenciales
+; UAC — el supervisor o técnico — y no al del cajero. Kairo terminaría en un
+; perfil al que el operador no tiene acceso. Con "lowest" todos esos recursos
+; per-user resuelven al usuario correcto POR CONSTRUCCIÓN: no hay que leer
+; ProfileList, adivinar rutas de perfil ni reparar ACLs después.
+;
+; Esto es compatible con el escenario cajero-estándar + supervisor-admin:
+; el cajero lanza el Setup, y el UAC aparece solo en el momento de instalar
+; PostgreSQL. Ver InitializeSetup, que bloquea el arranque elevado porque
+; "lowest" por sí solo no lo impide.
+;
+; Verificado sobre los ACL por defecto de Windows 11: un usuario estándar
+; puede crear C:\ProgramData\KairoPOS (Users tiene AD/crear-subdirectorios) y
+; queda como propietario, así que también puede fijar su DACL; y el proceso
+; elevado puede leer {tmp} (Administradores hereda Full en el Temp de cada
+; usuario), que es de donde se lanza el instalador de PostgreSQL.
+;
+; Ojo: mover {app} a Program Files NO es alternativa, porque entonces cada
+; auto-actualización pediría UAC (ver DefaultDirName arriba).
+PrivilegesRequired=lowest
 SetupIconFile=assets\enlip.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 DisableProgramGroupPage=yes
+; El frontend (KAIRO POs.exe) y el backend (ENLIPWebApi.exe, detached) pueden
+; seguir corriendo cuando se reinstala manualmente sobre una instalación
+; existente. Sin esto, Inno Setup falla al sobrescribir esos archivos con un
+; error nativo de "archivo en uso". CloseApplications usa Restart Manager
+; para detectar cualquier proceso con archivos abiertos bajo {app} y cerrarlo
+; automáticamente antes de copiar.
+CloseApplications=force
+CloseApplicationsFilter=*.exe
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "Crear icono en el Escritorio"; GroupDescription: "Iconos adicionales:"; Flags: unchecked
@@ -56,27 +109,63 @@ Source: "{#BackendDir}\appsettings.json"; DestDir: "{app}\api"; Flags: ignorever
 Source: "version.json"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ── Kairo Updater (external process that replaces files after Electron exits)
-Source: "assets\kairo-updater\kairo-updater.exe"; DestDir: "{app}\updater"; Flags: ignoreversion; Check: UpdaterExists
+; Sin Check: el archivo se embebe en tiempo de compilacion y SIEMPRE debe
+; extraerse. (Antes tenia Check: UpdaterExists, que evaluaba {src} -- la
+; carpeta desde donde el usuario final ejecuta el Setup, NO la carpeta de
+; assets del build. En cualquier maquina limpia esa ruta no existe, el Check
+; devolvia False y kairo-updater.exe nunca se instalaba: las actualizaciones
+; se descargaban y verificaban bien, pero al aplicarlas Electron caia en el
+; fallback "kairo-updater.exe no encontrado" y solo se reiniciaba sin
+; reemplazar nada.) La existencia se valida ahora en tiempo de compilacion.
+Source: "{#UpdaterExeSource}"; DestDir: "{app}\updater"; Flags: ignoreversion
 
 ; ── PostgreSQL installer — extracted to temp only when needed ───────────────
 Source: "assets\postgresql_installer.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallBackend
 
 [Icons]
+; Accesos directos per-user: con PrivilegesRequired=lowest, {group} resuelve
+; solo al menú Inicio del usuario y {autodesktop} a su escritorio. Antes era
+; {commondesktop} ("para todos los usuarios"), que además de requerir admin
+; apuntaría a un {app} dentro de un perfil que los demás usuarios no pueden
+; leer — un acceso directo visible para todos pero funcional para uno solo.
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{tmp}\postgresql_installer.exe"; Parameters: "{code:GetPostgresInstallerParams}"; StatusMsg: "Instalando PostgreSQL..."; Check: ShouldInstallPostgres
+; PostgreSQL ya NO se lanza desde aquí: las entradas de [Run] heredan los
+; privilegios del Setup, que ahora es no elevado. Se instala desde [Code]
+; (ver RunElevatedPhase), que es donde se puede pedir elevación puntual.
 Filename: "{app}\{#AppExeName}"; Description: "Abrir {#AppName} ahora"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 
 [Dirs]
-Name: "{commonappdata}\KairoPOS"; Permissions: users-modify
-Name: "{commonappdata}\KairoPOS\Files"; Permissions: users-modify
-Name: "{commonappdata}\KairoPOS\backups"; Permissions: users-modify
-Name: "{commonappdata}\KairoPOS\state"; Permissions: users-modify
+; Sin "Permissions:" a propósito. Fijar un DACL requiere ser propietario del
+; directorio, y hay un caso donde no lo somos: al migrar desde alpha.8 o
+; anterior, C:\ProgramData\KairoPOS ya existe creado por aquel Setup elevado
+; (propietario: la cuenta administradora), y la desinstalación no lo borra
+; porque contiene datos. El Setup nuevo corre como el cajero, así que
+; intentar reescribir ese DACL fallaría.
+;
+; No hace falta: los dos caminos ya quedan correctos sin tocar permisos.
+;   - Instalación nueva: el cajero crea las carpetas y hereda CREATOR OWNER
+;     (control total) del ACL por defecto de C:\ProgramData, que además
+;     permite a los usuarios estándar crear subdirectorios ahí.
+;   - Migración desde alpha.8: las carpetas ya existen con users-modify
+;     aplicado por el instalador viejo, así que el cajero ya puede escribir.
+; Inno simplemente no hace nada si el directorio ya existe.
+;
+; Es la opción más segura: elimina la única operación que podía fallar y no
+; modifica ni borra ningún dato existente.
+;
+; Límite conocido y aceptado: en una instalación nueva, otro usuario de
+; Windows en la misma PC solo tendría lectura sobre estas carpetas. El modelo
+; soportado es un usuario de POS por equipo, así que no aplica.
+Name: "{commonappdata}\KairoPOS"
+Name: "{commonappdata}\KairoPOS\Files"
+Name: "{commonappdata}\KairoPOS\backups"
+Name: "{commonappdata}\KairoPOS\state"
 
 [Code]
 
@@ -135,6 +224,114 @@ var
   UpdateServerLabel: TLabel;
   UpdateServerNote: TLabel;
 
+{ ── Arranque: guards previos al asistente ────────────────────────────────── }
+
+{ Clave de desinstalación que escribía el modelo anterior. Con
+  PrivilegesRequired=admin, Inno corría en "administrative install mode" y
+  registraba la desinstalación en HKLM; el modelo nuevo (lowest) la registra
+  en HKCU. Esa diferencia es justo lo que permite distinguir una instalación
+  vieja de una reinstalación normal del mismo usuario, sin enumerar perfiles
+  ni tocar nada ajeno: basta leer HKLM, que un usuario estándar puede leer. }
+function LegacyUninstallKey: String;
+begin
+  Result := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{' +
+            '{#AppIdRaw}' + '}_is1';
+end;
+
+function FindLegacyMachineWideInstall(var Version: String; var Location: String): Boolean;
+var
+  Key: String;
+begin
+  Key := LegacyUninstallKey;
+  Result := True;
+
+  { Se consultan ambas vistas del registro: el modelo anterior compilaba con
+    ArchitecturesInstallIn64BitMode=x64 (vista de 64 bits), pero una alpha
+    más antigua pudo haber quedado registrada en la de 32. }
+  if RegQueryStringValue(HKLM64, Key, 'DisplayVersion', Version) or
+     RegQueryStringValue(HKLM32, Key, 'DisplayVersion', Version) then
+  begin
+    if not RegQueryStringValue(HKLM64, Key, 'InstallLocation', Location) then
+      RegQueryStringValue(HKLM32, Key, 'InstallLocation', Location);
+    Exit;
+  end;
+
+  { Sin DisplayVersion la entrada igual cuenta como instalación previa. }
+  if RegKeyExists(HKLM64, Key) or RegKeyExists(HKLM32, Key) then
+  begin
+    Version := '(desconocida)';
+    RegQueryStringValue(HKLM64, Key, 'InstallLocation', Location);
+    Exit;
+  end;
+
+  Result := False;
+end;
+
+function InitializeSetup: Boolean;
+var
+  LegacyVersion, LegacyLocation, Msg: String;
+begin
+  Result := True;
+
+  { ── Aviso: el Setup se está ejecutando elevado ──────────────────────────
+    PrivilegesRequired=lowest hace que el camino correcto sea el predeterminado
+    (Inno ya no auto-eleva, así que un doble clic normal nunca da token
+    elevado, ni siquiera a un administrador). Pero si alguien usa "Ejecutar
+    como administrador" a propósito, Kairo se instalaría en el perfil de esa
+    cuenta — el bug original.
+
+    Es un AVISO con opción de continuar, no un bloqueo: elevado no siempre
+    está mal. Un administrador instalando para sí mismo, o cualquier usuario
+    en una PC con UAC deshabilitado (donde todo admin corre siempre elevado),
+    están en el caso correcto y deben poder seguir. Mostrar la ruta real
+    resuelta deja que quien está frente a la pantalla decida en un vistazo,
+    sin que el instalador tenga que averiguar qué usuario "debería" recibir
+    la instalación.
+
+    Se usa IsAdmin y NO IsAdminInstallMode: con "lowest" el install mode es
+    siempre no administrativo aunque el proceso venga elevado. }
+  if IsAdmin and (not WizardSilent) then
+  begin
+    Msg := 'Este instalador se está ejecutando con permisos de administrador.' + #13#10#13#10 +
+           'Kairo POS se instalará en:' + #13#10 +
+           '    ' + ExpandConstant('{localappdata}\Programs\{#AppName}') + #13#10#13#10 +
+           'Si esa NO es la cuenta de Windows que va a utilizar el punto de venta, ' +
+           'cancela e inicia el instalador desde esa cuenta, con doble clic normal. ' +
+           'El instalador pedirá credenciales de administrador por su cuenta si hace ' +
+           'falta instalar PostgreSQL o abrir el firewall.' + #13#10#13#10 +
+           '¿Deseas continuar de todas formas?';
+    if MsgBox(Msg, mbConfirmation, MB_YESNO) <> IDYES then
+    begin
+      Log('Cancelado por el usuario tras el aviso de ejecucion elevada.');
+      Result := False;
+      Exit;
+    end;
+    Log('Advertencia: Setup elevado; el usuario eligio continuar.');
+  end;
+
+  { ── Instalación previa del modelo anterior ──────────────────────────────
+    Solo informa y se detiene. No desinstala ni modifica nada: migrar las
+    alphas anteriores es una tarea de despliegue aparte. }
+  if FindLegacyMachineWideInstall(LegacyVersion, LegacyLocation) then
+  begin
+    Msg := 'Se detectó una instalación anterior de Kairo POS (versión ' + LegacyVersion + ')';
+    if LegacyLocation <> '' then
+      Msg := Msg + ' en:' + #13#10 + '    ' + LegacyLocation;
+    Msg := Msg + '.' + #13#10#13#10 +
+           'Esa instalación se hizo con el modelo anterior, que la dejaba en el perfil ' +
+           'de la cuenta administradora en lugar del usuario del POS. No se puede ' +
+           'actualizar sobre ella.' + #13#10#13#10 +
+           'Desinstala Kairo POS desde "Agregar o quitar programas" y vuelve a ejecutar ' +
+           'este instalador. Tus datos no se pierden: la base de datos y los archivos en ' +
+           'C:\ProgramData\KairoPOS no se tocan al desinstalar.';
+    if not WizardSilent then
+      MsgBox(Msg, mbError, MB_OK);
+    Log('Abortado: instalación previa detectada en HKLM (v' + LegacyVersion + ', ' + LegacyLocation + ').');
+    Result := False;
+    Exit;
+  end;
+end;
+
 { ── Mode helpers ─────────────────────────────────────────────────────────── }
 
 function IsClientMode: Boolean;
@@ -147,9 +344,22 @@ begin
   Result := not ClientRadio.Checked;
 end;
 
-function ShouldInstallPostgres: Boolean;
+{ Extraído de ShouldInstallPostgres para poder reusarlo como VERIFICACIÓN
+  después de la instalación elevada: ShellExec no devuelve el exit code del
+  proceso lanzado (a diferencia de Exec), así que el resultado real se
+  comprueba por evidencia — que la clave exista ahora y antes no. Leer HKLM
+  no requiere privilegios. }
+function IsPostgresInstalled(var InstalledVersion: String): Boolean;
 var
   PostgresKey: String;
+begin
+  PostgresKey := 'SOFTWARE\PostgreSQL Global Development Group\PostgreSQL';
+  Result := RegQueryStringValue(HKLM64, PostgresKey, 'Version', InstalledVersion) or
+            RegQueryStringValue(HKLM32, PostgresKey, 'Version', InstalledVersion);
+end;
+
+function ShouldInstallPostgres: Boolean;
+var
   InstalledVersion: String;
 begin
   Result := True;
@@ -161,22 +371,13 @@ begin
     Exit;
   end;
 
-  PostgresKey := 'SOFTWARE\PostgreSQL Global Development Group\PostgreSQL';
-  if RegQueryStringValue(HKLM64, PostgresKey, 'Version', InstalledVersion) or
-     RegQueryStringValue(HKLM32, PostgresKey, 'Version', InstalledVersion) then
+  if IsPostgresInstalled(InstalledVersion) then
   begin
     Result := False;
     Log('PostgreSQL encontrado: v' + InstalledVersion + ' omitiendo instalacion.');
   end
   else
     Log('PostgreSQL no encontrado, se instalara.');
-end;
-
-function UpdaterExists: Boolean;
-begin
-  Result := FileExists(ExpandConstant('{src}\assets\kairo-updater\kairo-updater.exe'));
-  if not Result then
-    Log('kairo-updater.exe no encontrado en assets - se omitira en esta version.');
 end;
 
 function GetPostgresInstallerParams(Value: String): String;
@@ -796,14 +997,125 @@ begin
   Log('kairo-install.json escrito: mode=' + Mode);
 end;
 
-procedure OpenFirewallPort;
+{ ── Fase elevada ──────────────────────────────────────────────────────────
+  Las dos únicas operaciones de toda la instalación que exigen privilegios.
+  Se lanzan con ShellExec + verbo 'runas', que dispara el UAC en ese momento
+  concreto: el cajero ve el prompt y el supervisor teclea sus credenciales.
+
+  Van como DOS llamadas separadas y NO envueltas en un cmd.exe /C que las
+  encadene en un solo prompt. El motivo es el superpassword de PostgreSQL: lo
+  teclea el usuario, así que puede contener ", &, ^ o % — pasarlo por el shell
+  lo expondría a interpolación y rompería (o algo peor) la instalación. Como
+  parámetro directo de ShellExec no lo interpreta ningún shell, igual que
+  antes cuando era una entrada de [Run]. El costo es un segundo prompt UAC,
+  pero solo en la combinación modo Servidor + PostgreSQL ausente. }
+
+const
+  FirewallRuleName = 'Kairo POS API';
+
+function IsFirewallRulePresent: Boolean;
 var
   ResultCode: Integer;
 begin
-  Exec('netsh',
-    'advfirewall firewall add rule name="Kairo POS API" dir=in action=allow protocol=TCP localport=8855',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Log('Firewall: regla agregada para puerto 8855, resultado: ' + IntToStr(ResultCode));
+  { Listar reglas no requiere privilegios; netsh devuelve <> 0 si no hay
+    ninguna coincidencia. Sirve para verificar el resultado de la llamada
+    elevada, que por usar ShellExec no entrega exit code. }
+  Result := Exec('netsh',
+    'advfirewall firewall show rule name="' + FirewallRuleName + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+procedure InstallPostgresElevated;
+var
+  InstallerPath, InstalledVersion: String;
+  ErrorCode: Integer;
+begin
+  InstallerPath := ExpandConstant('{tmp}\postgresql_installer.exe');
+  if not FileExists(InstallerPath) then
+  begin
+    Log('ERROR: no se encontro el instalador de PostgreSQL en ' + InstallerPath);
+    MsgBox('No se encontró el instalador de PostgreSQL.' + #13#10#13#10 +
+           'Kairo quedó instalado, pero necesitarás instalar PostgreSQL manualmente ' +
+           'antes de usarlo.', mbError, MB_OK);
+    Exit;
+  end;
+
+  WizardForm.StatusLabel.Caption := 'Instalando PostgreSQL (requiere permisos de administrador)...';
+  Log('Solicitando elevacion para instalar PostgreSQL...');
+
+  if not ShellExec('runas', InstallerPath, GetPostgresInstallerParams(''),
+                   '', SW_SHOW, ewWaitUntilTerminated, ErrorCode) then
+  begin
+    { 1223 = ERROR_CANCELLED: el UAC fue rechazado o cerrado. Merece un
+      mensaje distinto al de un fallo real del instalador. }
+    if ErrorCode = 1223 then
+      MsgBox('No se otorgaron permisos de administrador, así que PostgreSQL no se instaló.' + #13#10#13#10 +
+             'Kairo POS quedó instalado correctamente, pero no funcionará hasta que ' +
+             'PostgreSQL esté disponible. Vuelve a ejecutar este instalador con un ' +
+             'administrador disponible para completar ese paso.', mbError, MB_OK)
+    else
+      MsgBox('No se pudo iniciar el instalador de PostgreSQL (código ' + IntToStr(ErrorCode) + ').' + #13#10#13#10 +
+             'Kairo POS quedó instalado, pero necesitarás instalar PostgreSQL manualmente.',
+             mbError, MB_OK);
+    Log('PostgreSQL: fallo al elevar/lanzar, ErrorCode=' + IntToStr(ErrorCode));
+    Exit;
+  end;
+
+  { Verificación por evidencia (ver IsPostgresInstalled). }
+  if IsPostgresInstalled(InstalledVersion) then
+    Log('PostgreSQL instalado correctamente: v' + InstalledVersion)
+  else
+  begin
+    Log('ADVERTENCIA: el instalador de PostgreSQL termino pero la clave de registro sigue ausente.');
+    MsgBox('El instalador de PostgreSQL terminó, pero no se pudo confirmar que quedara instalado.' + #13#10#13#10 +
+           'Kairo POS quedó instalado. Verifica PostgreSQL antes de usar el sistema.',
+           mbInformation, MB_OK);
+  end;
+end;
+
+procedure OpenFirewallPortElevated;
+var
+  ErrorCode: Integer;
+begin
+  if IsFirewallRulePresent then
+  begin
+    Log('Firewall: la regla "' + FirewallRuleName + '" ya existe, no se solicita elevacion.');
+    Exit;
+  end;
+
+  WizardForm.StatusLabel.Caption := 'Configurando el firewall (requiere permisos de administrador)...';
+  Log('Solicitando elevacion para abrir el puerto 8855...');
+
+  if not ShellExec('runas', 'netsh',
+       'advfirewall firewall add rule name="' + FirewallRuleName +
+       '" dir=in action=allow protocol=TCP localport=8855',
+       '', SW_HIDE, ewWaitUntilTerminated, ErrorCode) then
+  begin
+    Log('Firewall: fallo al elevar/lanzar, ErrorCode=' + IntToStr(ErrorCode));
+    MsgBox('No se pudo abrir el puerto 8855 en el firewall de Windows.' + #13#10#13#10 +
+           'Kairo POS quedó instalado, pero las terminales en modo Cliente no podrán ' +
+           'conectarse a este servidor hasta que se abra ese puerto.', mbError, MB_OK);
+    Exit;
+  end;
+
+  if IsFirewallRulePresent then
+    Log('Firewall: regla agregada para el puerto 8855.')
+  else
+  begin
+    Log('ADVERTENCIA: netsh termino pero la regla de firewall no aparece.');
+    MsgBox('No se pudo confirmar la regla de firewall para el puerto 8855.' + #13#10#13#10 +
+           'Verifícala manualmente si las terminales Cliente no logran conectarse.',
+           mbInformation, MB_OK);
+  end;
+end;
+
+procedure RunElevatedPhase;
+begin
+  if ShouldInstallPostgres then
+    InstallPostgresElevated;
+
+  if ServerRadio.Checked then
+    OpenFirewallPortElevated;
 end;
 
 procedure LockDownFileToAdmins(const FilePath: String);
@@ -846,7 +1158,24 @@ begin
     '  4. Solo veras la base de datos KAIRO_DB' + #13#10 + #13#10 +
     'NOTA: La contrasena del superusuario "postgres" es la que' + #13#10 +
     'definiste durante la instalacion. Guardala por separado.' + #13#10;
-  SaveStringToFile(CredPath, Content, False);
+  { Segundo caso de compatibilidad con alpha.8: si ya existe un
+    admin_credentials.txt de aquella instalación, quedó con su ACL restringido
+    a Administradores/SYSTEM y sobrevivió a la desinstalación (está en
+    ProgramData, que no se borra). El cajero no puede sobrescribirlo. No se
+    borra ni se le tocan los permisos — se escribe junto a la app, que es un
+    lugar al que el cajero sí tiene acceso, y se deja constancia en el log. }
+  if not SaveStringToFile(CredPath, Content, False) then
+  begin
+    Log('No se pudo escribir ' + CredPath + ' (probablemente un archivo de una ' +
+        'instalacion anterior con permisos restringidos). Usando ruta alternativa.');
+    CredPath := ExpandConstant('{app}\admin_credentials.txt');
+    if not SaveStringToFile(CredPath, Content, False) then
+    begin
+      Log('ERROR: tampoco se pudo escribir ' + CredPath + '. No se guardaron las credenciales.');
+      Exit;
+    end;
+  end;
+
   LockDownFileToAdmins(CredPath);
   Log('Credenciales de kairo_user guardadas en: ' + CredPath);
 end;
@@ -855,6 +1184,12 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
+    { La fase elevada va PRIMERO, mientras el supervisor que teclea las
+      credenciales UAC sigue presente frente a la máquina. Si falla no se
+      aborta la instalación: los archivos de configuración se escriben igual,
+      para que quede recuperable instalando PostgreSQL a mano después. }
+    RunElevatedPhase;
+
     WriteInstallConfig;
     if not ClientRadio.Checked then
     begin
@@ -863,18 +1198,5 @@ begin
       if AutoModeRadio.Checked then
         WriteCredentialsFile;
     end;
-    if ServerRadio.Checked then
-      OpenFirewallPort;
-  end;
-
-  if CurStep = ssDone then
-  begin
-    if (not ClientRadio.Checked) and AutoModeRadio.Checked then
-      MsgBox(
-        'Instalacion completada.' + #13#10 + #13#10 +
-        'Se generaron credenciales unicas para PostgreSQL.' + #13#10 +
-        'Guardalas en un lugar seguro:' + #13#10 + #13#10 +
-        'C:\ProgramData\KairoPOS\admin_credentials.txt',
-        mbInformation, MB_OK);
   end;
 end;

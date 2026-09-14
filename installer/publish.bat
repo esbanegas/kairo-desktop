@@ -295,6 +295,14 @@ for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%FRONT
 for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%BACKEND_ZIP%' -Algorithm SHA256).Hash.ToLower()"') do set "BACKEND_SHA=%%H"
 for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%TARGET_INSTALLER_EXE%' -Algorithm SHA256).Hash.ToLower()"') do set "INSTALLER_SHA=%%H"
 
+REM Tamanos en bytes: el cliente los usa para la barra de progreso combinada y
+REM para detectar una descarga truncada antes de gastar tiempo en el SHA256.
+REM Sin ellos el cliente no conoce el tamano total hasta recibir el
+REM Content-Length de cada archivo y el porcentaje pega saltos.
+for %%F in ("%FRONTEND_ZIP%")        do set "FRONTEND_SIZE=%%~zF"
+for %%F in ("%BACKEND_ZIP%")         do set "BACKEND_SIZE=%%~zF"
+for %%F in ("%TARGET_INSTALLER_EXE%") do set "INSTALLER_SIZE=%%~zF"
+
 REM 6. Generar latest-<channel>.json (KAIRO UPDATE MANIFEST V1.0)
 set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
 (
@@ -314,15 +322,18 @@ set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
   echo   "files": {
   echo     "installer": {
   echo       "name": "KairoSetup.exe",
-  echo       "sha256": "%INSTALLER_SHA%"
+  echo       "sha256": "%INSTALLER_SHA%",
+  echo       "size": %INSTALLER_SIZE%
   echo     },
   echo     "frontend": {
   echo       "name": "frontend.zip",
-  echo       "sha256": "%FRONTEND_SHA%"
+  echo       "sha256": "%FRONTEND_SHA%",
+  echo       "size": %FRONTEND_SIZE%
   echo     },
   echo     "backend": {
   echo       "name": "backend.zip",
-  echo       "sha256": "%BACKEND_SHA%"
+  echo       "sha256": "%BACKEND_SHA%",
+  echo       "size": %BACKEND_SIZE%
   echo     }
   echo   },
   echo   "update_policy": {

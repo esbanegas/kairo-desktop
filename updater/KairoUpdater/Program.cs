@@ -184,7 +184,11 @@ if (success && !string.IsNullOrEmpty(script.VersionJsonPath) && File.Exists(scri
     {
         var versionJson = File.ReadAllText(script.VersionJsonPath);
         var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(versionJson) ?? new();
-        var mutable = dict.ToDictionary(k => k.Key, v => (object)v.Value.GetRawText().Trim('"'));
+        // Conservar el JsonElement original en cada campo que no tocamos: con
+        // GetRawText().Trim('"') todo se reescribia como string y db_schema
+        // pasaba de 284 a "284" en cada actualizacion, corrompiendo el tipo
+        // para quien lea version.json despues.
+        var mutable = dict.ToDictionary(k => k.Key, v => (object)v.Value);
 
         mutable["version"]    = script.Version;
         mutable["channel"]    = script.Channel ?? "production";
