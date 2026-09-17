@@ -31,6 +31,41 @@
   #error kairo-updater.exe no encontrado en installer\assets\kairo-updater\. Ejecuta updater\build-updater.bat antes de compilar el instalador.
 #endif
 
+; ── PostgreSQL: dependencia bajo demanda ───────────────────────────────────
+; El build ESTANDAR no embebe PostgreSQL (357 MB): lo descarga solo si hace
+; falta. El build OFFLINE (compilar con /DBundlePostgres) si lo embebe, para
+; instalar en PCs sin Internet. La UNICA diferencia entre ambos es de donde
+; sale el instalador de PostgreSQL; todo lo demas (deteccion, instalacion,
+; configuracion, validacion) es codigo compartido — ver AcquirePostgresInstaller.
+;
+; La version esta FIJADA a proposito: nada de "latest". URL y hash se pueden
+; sobreescribir desde publish.bat con /DPostgresUrl y /DPostgresSha256 sin
+; tocar este archivo.
+#ifndef PostgresVersion
+  #define PostgresVersion "17"
+#endif
+#ifndef PostgresUrl
+  #define PostgresUrl "https://github.com/esbanegas/kairo-desktop/releases/download/deps-postgresql-17/postgresql_installer.exe"
+#endif
+#ifndef PostgresSha256
+  #define PostgresSha256 "c0728faccc95ced5a280efdc32413fe35764b2302670eec72569b0fd41ac3513"
+#endif
+#ifndef PostgresApproxSize
+  #define PostgresApproxSize "357 MB"
+#endif
+
+#define PostgresExeSource "assets\postgresql_installer.exe"
+#ifdef BundlePostgres
+  ; Solo el build offline exige el archivo en disco. El estandar compila sin
+  ; el, que es justo lo que permite builds limpios en CI (esta en .gitignore).
+  #if !FileExists(AddBackslash(SourcePath) + PostgresExeSource)
+    #error Build offline solicitado (/DBundlePostgres) pero falta installer\assets\postgresql_installer.exe.
+  #endif
+  #define SetupSuffix "-Offline"
+#else
+  #define SetupSuffix ""
+#endif
+
 #define FrontendDir  "..\..\acg-web\release\win-unpacked"
 #define BackendDir   "..\..\enlip-services\ENLIPWebApi\bin\Release\net8.0\publish"
 
@@ -45,7 +80,7 @@ AppPublisher={#AppPublisher}
 ; cada actualización; {localappdata}\Programs no, nunca.
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
-OutputBaseFilename=ENLIP_Setup_v{#AppVersion}
+OutputBaseFilename=ENLIP_Setup_v{#AppVersion}{#SetupSuffix}
 OutputDir=output
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -119,8 +154,18 @@ Source: "version.json"; DestDir: "{app}"; Flags: ignoreversion
 ; reemplazar nada.) La existencia se valida ahora en tiempo de compilacion.
 Source: "{#UpdaterExeSource}"; DestDir: "{app}\updater"; Flags: ignoreversion
 
-; ── PostgreSQL installer — extracted to temp only when needed ───────────────
-Source: "assets\postgresql_installer.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: ShouldInstallBackend
+; -- PostgreSQL installer: SOLO en el build offline ------------------------
+; En el build estandar esta entrada no existe, asi que el .exe pesa ~357 MB
+; menos y PostgreSQL se descarga bajo demanda (ver AcquirePostgresInstaller).
+; Un "Check:" no serviria aqui: es runtime, y el archivo quedaria embebido.
+#ifdef BundlePostgres
+; dontcopy (y NO DestDir): el archivo queda dentro del .exe y solo se extrae
+; bajo demanda con ExtractTemporaryFile, desde el asistente. Con DestDir
+; se extraeria en la fase de instalacion, que ocurre DESPUES del asistente,
+; y para entonces ya seria tarde: la instalacion de PostgreSQL pasa a hacerse
+; en la pagina de conexion para poder probarla y corregirla antes de terminar.
+Source: "{#PostgresExeSource}"; Flags: dontcopy
+#endif
 
 [Icons]
 ; Accesos directos per-user: con PrivilegesRequired=lowest, {group} resuelve
@@ -217,6 +262,16 @@ var
   PgAdminPassAutoMode: TEdit;
   PgAdminPassAutoModeLabel: TLabel;
   PgAdminPassAutoModeNote: TLabel;
+
+  { ── Pagina de verificacion de PostgreSQL (nueva) ── }
+  PgVerifyPage: TWizardPage;
+  PgvSummary, PgvResult: TLabel;
+  PgvHostLabel, PgvPortLabel, PgvUserLabel, PgvPassLabel: TLabel;
+  PgvHost, PgvPort, PgvUser, PgvPass: TEdit;
+  PgvTestBtn, PgvDownloadBtn, PgvSkipBtn: TNewButton;
+  { Valores confirmados en esa pagina: los que se escriben en appsettings.json }
+  FinalPgHost, FinalPgPort, FinalPgAdminUser, FinalPgAdminPass: String;
+  PgConnectionVerified: Boolean;
 
   { ── Update Server page ── }
   UpdatePage: TWizardPage;
@@ -344,23 +399,226 @@ begin
   Result := not ClientRadio.Checked;
 end;
 
-{ Extraído de ShouldInstallPostgres para poder reusarlo como VERIFICACIÓN
-  después de la instalación elevada: ShellExec no devuelve el exit code del
-  proceso lanzado (a diferencia de Exec), así que el resultado real se
-  comprueba por evidencia — que la clave exista ahora y antes no. Leer HKLM
-  no requiere privilegios. }
-function IsPostgresInstalled(var InstalledVersion: String): Boolean;
+{ ══ PostgreSQL: deteccion, validacion y obtencion del instalador ═══════════
+
+  Este bloque encapsula TODO lo relativo a PostgreSQL para que el flujo online
+  y el offline compartan la misma logica. La unica diferencia entre ambos esta
+  en AcquirePostgresInstaller(): de donde sale el .exe. Instalar, detectar,
+  configurar y validar es codigo comun.
+
+  Estado de la instancia detectada. Se rellena con DetectPostgres() y lo
+  consumen las paginas del asistente y WriteAppSettings. }
 var
-  PostgresKey: String;
+  PgDetected: Boolean;
+  PgVersion: String;      { "17" }
+  PgLocation: String;     { "C:\Program Files\PostgreSQL\17" }
+  PgService: String;      { "postgresql-x64-17", '' si no se identifico }
+  PgDetectedPort: String;         { puerto real leido de postgresql.conf, o '' }
+  PgPortDetected: Boolean;{ False => PgDetectedPort es el valor por defecto, no leido }
+  PgInstallAttempted: Boolean; { evita reinstalar si el usuario vuelve atras }
+  PgUserSkipped: Boolean;      { eligio "Continuar sin PostgreSQL" }
+
+{ PGPASSWORD se pasa por variable de entorno del proceso, NUNCA por linea de
+  comandos: los argumentos de un proceso son visibles para cualquier usuario
+  de la maquina (Administrador de tareas, WMI) y acabarian en logs. El hijo
+  hereda el entorno del Setup, asi que esto basta y no deja rastro en disco. }
+function SetEnvironmentVariable(lpName: String; lpValue: String): Boolean;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+function PgDefaultPort: String;
 begin
-  PostgresKey := 'SOFTWARE\PostgreSQL Global Development Group\PostgreSQL';
-  Result := RegQueryStringValue(HKLM64, PostgresKey, 'Version', InstalledVersion) or
-            RegQueryStringValue(HKLM32, PostgresKey, 'Version', InstalledVersion);
+  Result := '5432';
 end;
 
-function ShouldInstallPostgres: Boolean;
+{ Ruta a una herramienta de linea de comandos dentro de la instalacion
+  detectada (psql.exe vive en <Location>\bin). }
+function PgBinTool(const ToolName: String): String;
+begin
+  if PgLocation = '' then
+    Result := ''
+  else
+    Result := AddBackslash(PgLocation) + 'bin\' + ToolName;
+end;
+
+{ Lee el puerto de postgresql.conf. Puede fallar legitimamente: el directorio
+  de datos suele estar restringido a la cuenta del servicio y a los
+  Administradores, y el Setup corre como usuario estandar. Por eso el puerto
+  es EDITABLE en el asistente y la verdad final la da ProbarConexion, no esto. }
+function ReadPortFromConf(const DataDir: String; var Port: String): Boolean;
 var
-  InstalledVersion: String;
+  Lines: TArrayOfString;
+  I, P: Integer;
+  Line, Value: String;
+begin
+  Result := False;
+  if not FileExists(AddBackslash(DataDir) + 'postgresql.conf') then Exit;
+  if not LoadStringsFromFile(AddBackslash(DataDir) + 'postgresql.conf', Lines) then Exit;
+
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Trim(Lines[I]);
+    if (Line = '') or (Copy(Line, 1, 1) = '#') then Continue;
+    if Lowercase(Copy(Line, 1, 4)) <> 'port' then Continue;
+
+    P := Pos('=', Line);
+    if P = 0 then Continue;
+    Value := Trim(Copy(Line, P + 1, Length(Line)));
+
+    { Recortar comentario al final de la linea: "port = 5433  # comentario" }
+    P := Pos('#', Value);
+    if P > 0 then Value := Trim(Copy(Value, 1, P - 1));
+    { Y comillas, que postgresql.conf admite }
+    StringChangeEx(Value, '''', '', True);
+
+    if (Value <> '') and (StrToIntDef(Value, 0) > 0) then
+    begin
+      Port := Value;
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+{ Identifica el servicio de Windows de la instancia. El instalador de EDB usa
+  el patron postgresql-x64-<version>. Se confirma contra el registro en vez de
+  asumirlo, para no mostrarle al usuario un servicio que no existe. }
+function DetectPgService(const Version: String): String;
+var
+  Candidate: String;
+begin
+  Result := '';
+  Candidate := 'postgresql-x64-' + Version;
+  if RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\' + Candidate) then
+  begin
+    Result := Candidate;
+    Exit;
+  end;
+  Candidate := 'postgresql-' + Version;
+  if RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\' + Candidate) then
+    Result := Candidate;
+end;
+
+{ Deteccion completa. Sustituye a la comprobacion anterior, que solo leia
+  "Version" del registro y daba por hecho localhost:5432 — insuficiente en una
+  maquina con varias instancias (p. ej. 16 en 5432 y 17 en 5433). }
+procedure DetectPostgres;
+var
+  Key: String;
+begin
+  PgDetected := False;
+  PgVersion := '';
+  PgLocation := '';
+  PgService := '';
+  PgDetectedPort := PgDefaultPort;
+  PgPortDetected := False;
+
+  Key := 'SOFTWARE\PostgreSQL Global Development Group\PostgreSQL';
+  if not (RegQueryStringValue(HKLM64, Key, 'Version', PgVersion) or
+          RegQueryStringValue(HKLM32, Key, 'Version', PgVersion)) then
+  begin
+    Log('[PG] No se detecto PostgreSQL en el registro.');
+    Exit;
+  end;
+
+  PgDetected := True;
+  if not RegQueryStringValue(HKLM64, Key, 'Location', PgLocation) then
+    RegQueryStringValue(HKLM32, Key, 'Location', PgLocation);
+
+  PgService := DetectPgService(PgVersion);
+
+  if PgLocation <> '' then
+    PgPortDetected := ReadPortFromConf(AddBackslash(PgLocation) + 'data', PgDetectedPort);
+
+  Log('[PG] Detectado: v' + PgVersion + ' | ruta=' + PgLocation +
+      ' | servicio=' + PgService + ' | puerto=' + PgDetectedPort +
+      ' | puerto leido de conf=' + IntToStr(Ord(PgPortDetected)));
+end;
+
+{ Texto para el asistente: que se encontro, o que no hay nada. }
+function PgDetectionSummary: String;
+begin
+  if not PgDetected then
+  begin
+    Result := 'PostgreSQL no detectado en este equipo.';
+    Exit;
+  end;
+  Result := 'PostgreSQL ' + PgVersion + ' detectado';
+  if PgLocation <> '' then
+    Result := Result + #13#10 + 'Ubicacion: ' + PgLocation;
+  if PgService <> '' then
+    Result := Result + #13#10 + 'Servicio: ' + PgService;
+  if PgPortDetected then
+    Result := Result + #13#10 + 'Puerto configurado: ' + PgDetectedPort
+  else
+    Result := Result + #13#10 + 'Puerto: ' + PgDetectedPort + ' (no se pudo leer postgresql.conf; verificalo)';
+end;
+
+{ ── Prueba de conexion real ─────────────────────────────────────────────────
+  Comprueba de verdad que el host responde, el puerto responde, el usuario
+  existe y la contrasena es valida — no solo que los campos no esten vacios.
+
+  -w  nunca pedir contrasena por consola. Sin esto, con una credencial mala
+      psql se quedaria esperando entrada en una ventana oculta y colgaria el
+      asistente para siempre.
+  -c "SELECT 1"  la consulta mas barata que prueba el circuito completo. }
+function TestPgConnection(const Host, Port, User, Pass: String; var ErrMsg: String): Boolean;
+var
+  Psql: String;
+  RC: Integer;
+  Launched, IgnoredBool: Boolean;
+begin
+  Result := False;
+  ErrMsg := '';
+
+  Psql := PgBinTool('psql.exe');
+  if (Psql = '') or (not FileExists(Psql)) then
+  begin
+    { El componente "Command Line Tools" del instalador de EDB es
+      desmarcable. Nuestra instalacion desatendida si lo incluye, pero un
+      PostgreSQL preexistente instalado a mano puede no tenerlo. No es motivo
+      para bloquear: se avisa y se deja seguir. }
+    ErrMsg := 'No se encontro psql.exe, asi que no se puede verificar la conexion ' +
+              'automaticamente. Revisa los datos manualmente antes de continuar.';
+    Exit;
+  end;
+
+  IgnoredBool := SetEnvironmentVariable('PGPASSWORD', Pass);
+  try
+    Launched := Exec(Psql,
+      '-h ' + Host + ' -p ' + Port + ' -U ' + User + ' -d postgres -w -c "SELECT 1"',
+      '', SW_HIDE, ewWaitUntilTerminated, RC);
+  finally
+    { Limpiar siempre: que la credencial no sobreviva en el entorno del Setup. }
+    IgnoredBool := SetEnvironmentVariable('PGPASSWORD', '');
+  end;
+
+  if not Launched then
+  begin
+    ErrMsg := 'No se pudo ejecutar psql.exe para verificar la conexion.';
+    Exit;
+  end;
+
+  if RC = 0 then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  { Codigos de salida de psql: 1 error fatal, 2 problema de conexion
+    (incluye credencial invalida), 3 error de script. }
+  if RC = 2 then
+    ErrMsg := 'No se pudo conectar a PostgreSQL en ' + Host + ':' + Port + '.' + #13#10 +
+              'Revisa que el servicio este corriendo, que el puerto sea el correcto ' +
+              'y que el usuario y la contrasena sean validos.'
+  else
+    ErrMsg := 'PostgreSQL rechazo la conexion (codigo ' + IntToStr(RC) + ').' + #13#10 +
+              'Verifica host, puerto, usuario y contrasena.';
+end;
+
+{ Ahora se apoya en DetectPostgres (que ademas resuelve ruta, servicio y
+  puerto) en vez de solo mirar si existe la clave del registro. El resultado
+  para el llamador es el mismo, por eso el resto del script no cambia. }
+function ShouldInstallPostgres: Boolean;
 begin
   Result := True;
 
@@ -371,13 +629,13 @@ begin
     Exit;
   end;
 
-  if IsPostgresInstalled(InstalledVersion) then
+  if PgDetected then
   begin
     Result := False;
-    Log('PostgreSQL encontrado: v' + InstalledVersion + ' omitiendo instalacion.');
+    Log('PostgreSQL encontrado: v' + PgVersion + ' omitiendo instalacion.');
   end
   else
-    Log('PostgreSQL no encontrado, se instalara.');
+    Log('PostgreSQL no encontrado.');
 end;
 
 function GetPostgresInstallerParams(Value: String): String;
@@ -390,6 +648,131 @@ begin
     AdminPass := PgAdminPass.Text;
 
   Result := '--mode unattended --unattendedmodeui minimal --disable-components stackbuilder --superpassword "' + AdminPass + '"';
+end;
+
+{ ══ Obtencion e instalacion de PostgreSQL ══════════════════════════════════
+
+  AcquirePostgresInstaller es el UNICO punto donde el sabor online y el
+  offline se diferencian:
+
+    offline (/DBundlePostgres) -> el .exe ya lo dejo [Files] en la carpeta temporal
+    estandar                   -> se descarga de GitHub y se verifica SHA-256
+
+  Todo lo que viene despues (ejecutar el instalador, re-detectar la instancia,
+  configurar, validar) es identico en ambos, que es justo lo que pedia el
+  requisito de no acoplar la logica al flujo online. }
+
+var
+  DownloadPage: TDownloadWizardPage;
+
+{ Progreso de la descarga. Se muestra en MB porque el porcentaje solo no dice
+  nada util con 357 MB por delante sobre un enlace lento. }
+function OnPgDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
+begin
+  if ProgressMax > 0 then
+    DownloadPage.SetText('Descargando PostgreSQL {#PostgresVersion}...',
+      IntToStr(Progress div 1048576) + ' MB de ' + IntToStr(ProgressMax div 1048576) + ' MB');
+  Result := True;
+end;
+
+function AcquirePostgresInstaller(var InstallerPath: String; var ErrMsg: String): Boolean;
+begin
+  InstallerPath := ExpandConstant('{tmp}\postgresql_installer.exe');
+  ErrMsg := '';
+
+#ifdef BundlePostgres
+
+  { Sabor offline: el .exe viene embebido con dontcopy; se saca a la carpeta
+    temporal justo ahora. Sin red. Son ~357 MB, asi que tarda unos segundos. }
+  try
+    ExtractTemporaryFile('postgresql_installer.exe');
+    Result := FileExists(InstallerPath);
+    if not Result then
+      ErrMsg := 'No se pudo preparar el instalador de PostgreSQL embebido.';
+  except
+    Result := False;
+    ErrMsg := 'No se pudo extraer el instalador de PostgreSQL embebido: ' + GetExceptionMessage;
+  end;
+  if Result then
+    Log('[PG] Usando PostgreSQL embebido (build offline): ' + InstallerPath);
+
+#else
+
+  { Sabor estandar: descarga con progreso, cancelacion y verificacion SHA-256,
+    todo nativo de Inno Setup 6. El hash es obligatorio: si no coincide, la
+    excepcion salta y NO se ejecuta nada de lo descargado. }
+  DownloadPage.Clear;
+  DownloadPage.Add('{#PostgresUrl}', 'postgresql_installer.exe', '{#PostgresSha256}');
+  DownloadPage.Show;
+  try
+    try
+      DownloadPage.Download;
+      Result := FileExists(InstallerPath);
+      if Result then
+        Log('[PG] PostgreSQL descargado y verificado (SHA-256 OK).')
+      else
+        ErrMsg := 'La descarga termino pero no se encontro el archivo.';
+    except
+      Result := False;
+      ErrMsg := GetExceptionMessage;
+      Log('[PG] Fallo la descarga o la verificacion: ' + ErrMsg);
+    end;
+  finally
+    DownloadPage.Hide;
+  end;
+
+#endif
+end;
+
+{ Ejecuta el instalador de PostgreSQL. Reutiliza GetPostgresInstallerParams tal
+  cual: son los mismos parametros desatendidos que ya funcionaban. Requiere
+  elevacion (el .exe de EDB pide admin en su propio manifiesto), por eso
+  ShellExec con verbo runas y no Exec — CreateProcess fallaria con
+  ERROR_ELEVATION_REQUIRED desde un Setup no elevado. }
+function RunPostgresInstaller(const InstallerPath: String; var ErrMsg: String): Boolean;
+var
+  ErrorCode: Integer;
+begin
+  ErrMsg := '';
+  Log('[PG] Ejecutando instalador de PostgreSQL (se pedira elevacion)...');
+
+  Result := ShellExec('runas', InstallerPath, GetPostgresInstallerParams(''),
+                      '', SW_SHOW, ewWaitUntilTerminated, ErrorCode);
+  if not Result then
+  begin
+    if ErrorCode = 1223 then
+      ErrMsg := 'No se otorgaron permisos de administrador, asi que PostgreSQL no se instalo.'
+    else
+      ErrMsg := 'No se pudo iniciar el instalador de PostgreSQL (codigo ' + IntToStr(ErrorCode) + ').';
+    Log('[PG] ' + ErrMsg);
+  end;
+end;
+
+{ Orquesta el ciclo completo: obtener -> instalar -> volver a detectar.
+  Se vuelve a detectar para quedarse con la ruta, el servicio y el puerto
+  REALES de lo que acaba de instalarse, en vez de darlos por supuestos. }
+function EnsurePostgresInstalled(var ErrMsg: String): Boolean;
+var
+  InstallerPath: String;
+begin
+  Result := False;
+  ErrMsg := '';
+
+  if not AcquirePostgresInstaller(InstallerPath, ErrMsg) then Exit;
+  if not RunPostgresInstaller(InstallerPath, ErrMsg) then Exit;
+
+  PgInstallAttempted := True;
+
+  DetectPostgres;
+  if not PgDetected then
+  begin
+    ErrMsg := 'El instalador de PostgreSQL termino, pero no se pudo confirmar que ' +
+              'quedara instalado. Verificalo antes de continuar.';
+    Log('[PG] ' + ErrMsg);
+    Exit;
+  end;
+
+  Result := True;
 end;
 
 { ── Random password generator ───────────────────────────────────────────── }
@@ -698,9 +1081,235 @@ begin
   PgAppPass.Parent := PgConfigPage.Surface;
 end;
 
+{ ══ Pagina de verificacion de PostgreSQL ═══════════════════════════════════
+
+  Pagina NUEVA, insertada entre la configuracion de base de datos y el resumen
+  final. Se agrego aparte en vez de meter controles en PgModePage/PgConfigPage
+  para no tocar el layout de unas paginas que ya funcionan.
+
+  Hace tres cosas que antes no existian:
+    1. Muestra la instancia realmente detectada (version, ruta, servicio,
+       puerto), en vez de asumir localhost:5432.
+    2. Si no hay PostgreSQL, ofrece descargarlo o continuar sin el.
+    3. Obliga a probar la conexion de verdad antes de seguir, para que una
+       contrasena mal tecleada se vea aqui y no como un fallo incomprensible
+       la primera vez que se abre Kairo.
+
+  Los valores confirmados aqui son los que WriteAppSettings termina escribiendo. }
+
+
+{ Rellena la pagina con lo detectado y con lo que el usuario eligio en las
+  paginas anteriores. Se llama cada vez que la pagina se muestra, para que
+  refleje el resultado de una instalacion de PostgreSQL hecha desde aqui. }
+procedure RefreshPgVerifyPage;
+begin
+  PgvSummary.Caption := PgDetectionSummary;
+
+  { Botones segun el estado: si hay PostgreSQL solo tiene sentido probar; si
+    no lo hay, ofrecer instalarlo o seguir sin el. }
+  PgvTestBtn.Visible := PgDetected;
+  PgvDownloadBtn.Visible := (not PgDetected) and (not PgUserSkipped);
+  PgvSkipBtn.Visible := (not PgDetected) and (not PgUserSkipped);
+
+  PgvHost.Enabled := PgDetected;
+  PgvPort.Enabled := PgDetected;
+  PgvUser.Enabled := PgDetected;
+  PgvPass.Enabled := PgDetected;
+
+  if PgUserSkipped then
+    PgvResult.Caption := 'Continuaras sin PostgreSQL. Kairo se instalara, pero no ' +
+                         'podra usar la base local hasta que instales y configures PostgreSQL.';
+
+  { Prefill: en modo automatico se fija host/usuario y se usa el puerto REAL
+    detectado (antes estaba cableado a 5432, lo que rompia en equipos con
+    varias instancias). En modo personalizado se arrastra lo ya tecleado. }
+  if AutoModeRadio.Checked then
+  begin
+    if PgvHost.Text = '' then PgvHost.Text := 'localhost';
+    if PgvPort.Text = '' then PgvPort.Text := PgDetectedPort;
+    if PgvUser.Text = '' then PgvUser.Text := 'postgres';
+    if PgvPass.Text = '' then PgvPass.Text := PgAdminPassAutoMode.Text;
+  end
+  else
+  begin
+    if PgvHost.Text = '' then PgvHost.Text := Trim(PgHost.Text);
+    if PgvPort.Text = '' then PgvPort.Text := Trim(PgPort.Text);
+    if PgvUser.Text = '' then PgvUser.Text := Trim(PgAdminUser.Text);
+    if PgvPass.Text = '' then PgvPass.Text := PgAdminPass.Text;
+  end;
+end;
+
+{ Guarda lo confirmado en la pagina: es la fuente de verdad para
+  WriteAppSettings. }
+procedure CommitPgVerifyValues;
+begin
+  FinalPgHost := Trim(PgvHost.Text);
+  FinalPgPort := Trim(PgvPort.Text);
+  FinalPgAdminUser := Trim(PgvUser.Text);
+  FinalPgAdminPass := PgvPass.Text;
+end;
+
+procedure OnPgTestClick(Sender: TObject);
+var
+  ErrMsg: String;
+begin
+  PgvResult.Caption := 'Probando conexion...';
+  if TestPgConnection(Trim(PgvHost.Text), Trim(PgvPort.Text),
+                      Trim(PgvUser.Text), PgvPass.Text, ErrMsg) then
+  begin
+    PgConnectionVerified := True;
+    CommitPgVerifyValues;
+    PgvResult.Caption := 'Conexion correcta: PostgreSQL respondio en ' +
+                         Trim(PgvHost.Text) + ':' + Trim(PgvPort.Text) + '.';
+  end
+  else
+  begin
+    PgConnectionVerified := False;
+    PgvResult.Caption := ErrMsg;
+  end;
+end;
+
+procedure OnPgDownloadClick(Sender: TObject);
+var
+  ErrMsg: String;
+begin
+  if EnsurePostgresInstalled(ErrMsg) then
+  begin
+    { Tras instalar, la instancia nueva ya trae su ruta/servicio/puerto reales:
+      se limpian los campos para que RefreshPgVerifyPage los vuelva a llenar. }
+    PgvHost.Text := '';
+    PgvPort.Text := '';
+    PgvUser.Text := '';
+    RefreshPgVerifyPage;
+    PgvResult.Caption := 'PostgreSQL ' + PgVersion + ' se instalo correctamente. ' +
+                         'Ahora prueba la conexion.';
+  end
+  else
+  begin
+    RefreshPgVerifyPage;
+    PgvResult.Caption := ErrMsg;
+  end;
+end;
+
+procedure OnPgSkipClick(Sender: TObject);
+begin
+  if MsgBox('Kairo se instalara, pero NO podra usar la base de datos local hasta ' +
+            'que instales y configures PostgreSQL manualmente.' + #13#10#13#10 +
+            'La instalacion NO quedara lista para usarse.' + #13#10#13#10 +
+            'Deseas continuar sin PostgreSQL?', mbConfirmation, MB_YESNO) <> IDYES then
+    Exit;
+
+  PgUserSkipped := True;
+  PgConnectionVerified := False;
+  Log('[PG] El usuario eligio continuar sin PostgreSQL.');
+  RefreshPgVerifyPage;
+end;
+
+procedure CreatePgVerifyPage;
+begin
+  PgVerifyPage := CreateCustomPage(PgConfigPage.ID,
+    'Conexion con PostgreSQL',
+    'Verifica los datos de conexion antes de continuar.');
+
+  PgvSummary := TLabel.Create(PgVerifyPage);
+  PgvSummary.AutoSize := False;
+  PgvSummary.WordWrap := True;
+  PgvSummary.Top := 0;
+  PgvSummary.Left := 0;
+  PgvSummary.Width := 410;
+  PgvSummary.Height := 58;
+  PgvSummary.Parent := PgVerifyPage.Surface;
+
+  PgvHostLabel := TLabel.Create(PgVerifyPage);
+  PgvHostLabel.Caption := 'Host:';
+  PgvHostLabel.Top := 66;
+  PgvHostLabel.Left := 0;
+  PgvHostLabel.Parent := PgVerifyPage.Surface;
+
+  PgvHost := TEdit.Create(PgVerifyPage);
+  PgvHost.Top := 82;
+  PgvHost.Left := 0;
+  PgvHost.Width := 170;
+  PgvHost.Parent := PgVerifyPage.Surface;
+
+  PgvPortLabel := TLabel.Create(PgVerifyPage);
+  PgvPortLabel.Caption := 'Puerto:';
+  PgvPortLabel.Top := 66;
+  PgvPortLabel.Left := 190;
+  PgvPortLabel.Parent := PgVerifyPage.Surface;
+
+  PgvPort := TEdit.Create(PgVerifyPage);
+  PgvPort.Top := 82;
+  PgvPort.Left := 190;
+  PgvPort.Width := 80;
+  PgvPort.Parent := PgVerifyPage.Surface;
+
+  PgvUserLabel := TLabel.Create(PgVerifyPage);
+  PgvUserLabel.Caption := 'Usuario:';
+  PgvUserLabel.Top := 110;
+  PgvUserLabel.Left := 0;
+  PgvUserLabel.Parent := PgVerifyPage.Surface;
+
+  PgvUser := TEdit.Create(PgVerifyPage);
+  PgvUser.Top := 126;
+  PgvUser.Left := 0;
+  PgvUser.Width := 170;
+  PgvUser.Parent := PgVerifyPage.Surface;
+
+  PgvPassLabel := TLabel.Create(PgVerifyPage);
+  PgvPassLabel.Caption := 'Contrasena:';
+  PgvPassLabel.Top := 110;
+  PgvPassLabel.Left := 190;
+  PgvPassLabel.Parent := PgVerifyPage.Surface;
+
+  PgvPass := TEdit.Create(PgVerifyPage);
+  PgvPass.PasswordChar := '*';
+  PgvPass.Top := 126;
+  PgvPass.Left := 190;
+  PgvPass.Width := 170;
+  PgvPass.Parent := PgVerifyPage.Surface;
+
+  PgvTestBtn := TNewButton.Create(PgVerifyPage);
+  PgvTestBtn.Caption := 'Probar conexion';
+  PgvTestBtn.Top := 160;
+  PgvTestBtn.Left := 0;
+  PgvTestBtn.Width := 120;
+  PgvTestBtn.Height := 25;
+  PgvTestBtn.OnClick := @OnPgTestClick;
+  PgvTestBtn.Parent := PgVerifyPage.Surface;
+
+  PgvDownloadBtn := TNewButton.Create(PgVerifyPage);
+  PgvDownloadBtn.Caption := 'Descargar e instalar';
+  PgvDownloadBtn.Top := 160;
+  PgvDownloadBtn.Left := 130;
+  PgvDownloadBtn.Width := 130;
+  PgvDownloadBtn.Height := 25;
+  PgvDownloadBtn.OnClick := @OnPgDownloadClick;
+  PgvDownloadBtn.Parent := PgVerifyPage.Surface;
+
+  PgvSkipBtn := TNewButton.Create(PgVerifyPage);
+  PgvSkipBtn.Caption := 'Continuar sin PostgreSQL';
+  PgvSkipBtn.Top := 160;
+  PgvSkipBtn.Left := 268;
+  PgvSkipBtn.Width := 142;
+  PgvSkipBtn.Height := 25;
+  PgvSkipBtn.OnClick := @OnPgSkipClick;
+  PgvSkipBtn.Parent := PgVerifyPage.Surface;
+
+  PgvResult := TLabel.Create(PgVerifyPage);
+  PgvResult.AutoSize := False;
+  PgvResult.WordWrap := True;
+  PgvResult.Caption := '';
+  PgvResult.Top := 190;
+  PgvResult.Left := 0;
+  PgvResult.Width := 410;
+  PgvResult.Height := 34;
+  PgvResult.Parent := PgVerifyPage.Surface;
+end;
+
 procedure CreateUpdateServerPage;
 begin
-  UpdatePage := CreateCustomPage(PgConfigPage.ID,
+  UpdatePage := CreateCustomPage(PgVerifyPage.ID,
     'Servidor de Actualizaciones',
     'URL desde donde la aplicacion descargara las actualizaciones automaticamente.');
 
@@ -736,10 +1345,24 @@ end;
 procedure InitializeWizard;
 begin
   InitRand;
+
+  { Deteccion temprana: las paginas de base de datos se construyen a
+    continuacion y necesitan el puerto e info de la instancia para
+    prerellenarse con valores reales en vez de un 5432 asumido. }
+  DetectPostgres;
+  PgInstallAttempted := False;
+  PgUserSkipped := False;
+
+  DownloadPage := CreateDownloadPage(
+    'Descargando PostgreSQL',
+    'Kairo necesita PostgreSQL {#PostgresVersion} y no se encontro en este equipo.',
+    @OnPgDownloadProgress);
+
   CreateInstallModePage;
   CreateClientConfigPage;
   CreatePgModePage;
   CreatePgConfigPage;
+  CreatePgVerifyPage;
   CreateUpdateServerPage;
 end;
 
@@ -754,6 +1377,7 @@ begin
   begin
     if (PageID = PgModePage.ID) or
        (PageID = PgConfigPage.ID) or
+       (PageID = PgVerifyPage.ID) or
        (PageID = UpdatePage.ID) then
       Result := True;
     Exit;
@@ -771,9 +1395,71 @@ begin
     Result := AutoModeRadio.Checked;
 end;
 
+{ Refresca la pagina de verificacion cada vez que se entra en ella: puede
+  llegarse despues de instalar PostgreSQL desde la propia pagina, o tras
+  volver atras a cambiar el modo. }
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = PgVerifyPage.ID then
+    RefreshPgVerifyPage;
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  ErrMsg: String;
 begin
   Result := True;
+
+  { ── Pagina de verificacion de PostgreSQL ──────────────────────────────────
+    No se deja avanzar sin una conexion probada. La excepcion es haber elegido
+    explicitamente "Continuar sin PostgreSQL", y el caso en que no hay psql.exe
+    para verificar: ahi se avisa y se permite seguir, porque bloquear por una
+    herramienta ausente seria peor que el problema. }
+  if CurPageID = PgVerifyPage.ID then
+  begin
+    if PgUserSkipped then Exit;
+
+    if not PgDetected then
+    begin
+      MsgBox('Todavia no hay PostgreSQL en este equipo.' + #13#10#13#10 +
+             'Usa "Descargar e instalar", o "Continuar sin PostgreSQL" si vas a ' +
+             'configurarlo por tu cuenta mas tarde.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+
+    if not PgConnectionVerified then
+    begin
+      if TestPgConnection(Trim(PgvHost.Text), Trim(PgvPort.Text),
+                          Trim(PgvUser.Text), PgvPass.Text, ErrMsg) then
+      begin
+        PgConnectionVerified := True;
+        CommitPgVerifyValues;
+      end
+      else
+      begin
+        PgvResult.Caption := ErrMsg;
+        if Pos('psql.exe', ErrMsg) > 0 then
+        begin
+          { Sin psql no se puede verificar: avisar y dejar decidir. }
+          Result := MsgBox(ErrMsg + #13#10#13#10 + 'Deseas continuar de todas formas?',
+                           mbConfirmation, MB_YESNO) = IDYES;
+          if Result then CommitPgVerifyValues;
+        end
+        else
+        begin
+          MsgBox('No se pudo conectar a PostgreSQL.' + #13#10#13#10 + ErrMsg + #13#10#13#10 +
+                 'Corrige host, puerto, usuario o contrasena y vuelve a probar.',
+                 mbError, MB_OK);
+          Result := False;
+        end;
+      end;
+      Exit;
+    end;
+
+    CommitPgVerifyValues;
+    Exit;
+  end;
 
   if CurPageID = ClientConfigPage.ID then
   begin
@@ -875,7 +1561,7 @@ begin
   if AutoModeRadio.Checked then
   begin
     Host := 'localhost';
-    Port := '5432';
+    Port := PgDefaultPort;
     DbName := 'KAIRO_DB';
     AppUser := 'kairo_user';
     AppPass := GetAutoAppPass;
@@ -891,6 +1577,22 @@ begin
     AppPass := PgAppPass.Text;
     AdminUser := PgAdminUser.Text;
     AdminPass := PgAdminPass.Text;
+  end;
+
+  { Los valores realmente verificados en la pagina de conexion mandan sobre los
+    de arriba. Esto corrige el puerto que estaba cableado a 5432: en un equipo
+    con varias instancias de PostgreSQL (p. ej. 16 en 5432 y 17 en 5433) ese
+    valor apuntaria a la instancia equivocada. Si el usuario eligio continuar
+    sin PostgreSQL no hay nada confirmado, y se respeta lo anterior en vez de
+    escribir una configuracion inventada. }
+  if (not PgUserSkipped) and (FinalPgHost <> '') then
+  begin
+    Host := FinalPgHost;
+    Port := FinalPgPort;
+    AdminUser := FinalPgAdminUser;
+    AdminPass := FinalPgAdminPass;
+    Log('[PG] appsettings.json usara la conexion verificada: ' + Host + ':' + Port +
+        ' (usuario ' + AdminUser + ')');
   end;
 
   ConnString := 'Host=' + Host + ';Port=' + Port
@@ -1025,53 +1727,6 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
-procedure InstallPostgresElevated;
-var
-  InstallerPath, InstalledVersion: String;
-  ErrorCode: Integer;
-begin
-  InstallerPath := ExpandConstant('{tmp}\postgresql_installer.exe');
-  if not FileExists(InstallerPath) then
-  begin
-    Log('ERROR: no se encontro el instalador de PostgreSQL en ' + InstallerPath);
-    MsgBox('No se encontró el instalador de PostgreSQL.' + #13#10#13#10 +
-           'Kairo quedó instalado, pero necesitarás instalar PostgreSQL manualmente ' +
-           'antes de usarlo.', mbError, MB_OK);
-    Exit;
-  end;
-
-  WizardForm.StatusLabel.Caption := 'Instalando PostgreSQL (requiere permisos de administrador)...';
-  Log('Solicitando elevacion para instalar PostgreSQL...');
-
-  if not ShellExec('runas', InstallerPath, GetPostgresInstallerParams(''),
-                   '', SW_SHOW, ewWaitUntilTerminated, ErrorCode) then
-  begin
-    { 1223 = ERROR_CANCELLED: el UAC fue rechazado o cerrado. Merece un
-      mensaje distinto al de un fallo real del instalador. }
-    if ErrorCode = 1223 then
-      MsgBox('No se otorgaron permisos de administrador, así que PostgreSQL no se instaló.' + #13#10#13#10 +
-             'Kairo POS quedó instalado correctamente, pero no funcionará hasta que ' +
-             'PostgreSQL esté disponible. Vuelve a ejecutar este instalador con un ' +
-             'administrador disponible para completar ese paso.', mbError, MB_OK)
-    else
-      MsgBox('No se pudo iniciar el instalador de PostgreSQL (código ' + IntToStr(ErrorCode) + ').' + #13#10#13#10 +
-             'Kairo POS quedó instalado, pero necesitarás instalar PostgreSQL manualmente.',
-             mbError, MB_OK);
-    Log('PostgreSQL: fallo al elevar/lanzar, ErrorCode=' + IntToStr(ErrorCode));
-    Exit;
-  end;
-
-  { Verificación por evidencia (ver IsPostgresInstalled). }
-  if IsPostgresInstalled(InstalledVersion) then
-    Log('PostgreSQL instalado correctamente: v' + InstalledVersion)
-  else
-  begin
-    Log('ADVERTENCIA: el instalador de PostgreSQL termino pero la clave de registro sigue ausente.');
-    MsgBox('El instalador de PostgreSQL terminó, pero no se pudo confirmar que quedara instalado.' + #13#10#13#10 +
-           'Kairo POS quedó instalado. Verifica PostgreSQL antes de usar el sistema.',
-           mbInformation, MB_OK);
-  end;
-end;
 
 procedure OpenFirewallPortElevated;
 var
@@ -1109,11 +1764,12 @@ begin
   end;
 end;
 
+{ PostgreSQL ya NO se instala aqui: se movio al asistente (ver la pagina de
+  verificacion), que es donde el usuario puede probar la conexion y corregir
+  los datos antes de que la instalacion termine. Aqui solo queda el firewall,
+  que no necesita interaccion. }
 procedure RunElevatedPhase;
 begin
-  if ShouldInstallPostgres then
-    InstallPostgresElevated;
-
   if ServerRadio.Checked then
     OpenFirewallPortElevated;
 end;

@@ -24,6 +24,12 @@ if not "%~2"=="" (
 )
 
 if "%~1"=="" goto :menu
+REM --offline: sabor con PostgreSQL embebido. Es un modificador, no una
+REM operacion: se combina con --build-only y --all. NO cambia la version de
+REM Kairo ni el canal; solo de donde sale el instalador de PostgreSQL.
+set "OFFLINE="
+echo %* | findstr /i /c:"--offline" >nul && set "OFFLINE=1"
+
 if "%~1"=="--build-only" goto :dispatch_build
 if "%~1"=="-b" goto :dispatch_build
 if "%~1"=="--publish" goto :dispatch_publish
@@ -82,15 +88,23 @@ echo ============================================================
 echo  Canal seleccionado: !CHANNEL!
 echo ============================================================
 echo.
-echo  [1] Compilar paquetes (--build-only)
-echo  [2] Publicar Release a GitHub (--publish)
-echo  [3] Compilar y Publicar todo (--all)
-echo  [4] Verificar consistencia (solo lectura: manifest/tag/Release/assets)
-echo  [5] Salir
+echo  Instalador ESTANDAR (~125 MB, descarga PostgreSQL solo si hace falta):
+echo   [1] Compilar paquetes (--build-only)
+echo   [2] Publicar Release a GitHub (--publish)
+echo   [3] Compilar y Publicar todo (--all)
 echo.
-choice /c 12345 /n /m "Selecciona una opcion [1-5]: "
-if errorlevel 5 exit /b 0
-if errorlevel 4 goto :verify
+echo  Instalador OFFLINE (~482 MB, PostgreSQL embebido, sin Internet):
+echo   [4] Compilar instalador offline (--build-only --offline)
+echo   [5] Compilar y Publicar offline (--all --offline)
+echo.
+echo   [6] Verificar consistencia (solo lectura: manifest/tag/Release/assets)
+echo   [7] Salir
+echo.
+choice /c 1234567 /n /m "Selecciona una opcion [1-7]: "
+if errorlevel 7 exit /b 0
+if errorlevel 6 goto :verify
+if errorlevel 5 (set "OFFLINE=1" & goto :all)
+if errorlevel 4 (set "OFFLINE=1" & goto :build)
 if errorlevel 3 goto :all
 if errorlevel 2 goto :publish
 if errorlevel 1 goto :build
@@ -326,16 +340,40 @@ if not exist "!ISCC!" (
 )
 echo [INFO] Usando: !ISCC!
 
-"!ISCC!" /DAppVersion="%FULL_VERSION%" /DAppChannel="%CHANNEL%" /DUpdateServerUrl="https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/main/installer/updates" "%INSTALLER%\enlip_setup.iss"
+REM El sabor offline se decide en tiempo de COMPILACION: un "Check:" en la
+REM seccion [Files] no serviria, porque el archivo quedaria embebido igual y
+REM el .exe pesaria los 357 MB de todas formas.
+set "ISS_FLAVOR_ARGS="
+if defined OFFLINE (
+    echo [INFO] Sabor OFFLINE: PostgreSQL quedara embebido en el instalador.
+    set "ISS_FLAVOR_ARGS=/DBundlePostgres"
+) else (
+    echo [INFO] Sabor ESTANDAR: PostgreSQL se descargara bajo demanda.
+)
+
+"!ISCC!" /DAppVersion="%FULL_VERSION%" /DAppChannel="%CHANNEL%" /DUpdateServerUrl="https://raw.githubusercontent.com/%REPO_OWNER%/%REPO_NAME%/main/installer/updates" !ISS_FLAVOR_ARGS! "%INSTALLER%\enlip_setup.iss"
 if !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Fallo Inno Setup.
     call :restore_version
     exit /b 1
 )
-set "INSTALLER_EXE=%INSTALLER%\output\ENLIP_Setup_v%FULL_VERSION%.exe"
-set "TARGET_INSTALLER_EXE=%OUTPUT%\KairoSetup.exe"
-copy /y "%INSTALLER_EXE%" "%TARGET_INSTALLER_EXE%" >nul
-echo [OK] KairoSetup.exe
+REM Los dos sabores no deben pisarse en output/, ni al compilar ni como asset
+REM del Release. El sufijo lo pone el propio .iss via OutputBaseFilename.
+if defined OFFLINE (
+    set "INSTALLER_EXE=%INSTALLER%\output\ENLIP_Setup_v%FULL_VERSION%-Offline.exe"
+    set "SETUP_ASSET_NAME=KairoSetup-Offline.exe"
+) else (
+    set "INSTALLER_EXE=%INSTALLER%\output\ENLIP_Setup_v%FULL_VERSION%.exe"
+    set "SETUP_ASSET_NAME=KairoSetup.exe"
+)
+set "TARGET_INSTALLER_EXE=%OUTPUT%\!SETUP_ASSET_NAME!"
+if not exist "!INSTALLER_EXE!" (
+    echo [ERROR] No se genero !INSTALLER_EXE!.
+    call :restore_version
+    exit /b 1
+)
+copy /y "!INSTALLER_EXE!" "!TARGET_INSTALLER_EXE!" >nul
+echo [OK] !SETUP_ASSET_NAME!
 
 REM 5. Calcular Hashes SHA256
 echo [4/4] Calculando Hashes...
@@ -369,7 +407,7 @@ set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
   echo   },
   echo   "files": {
   echo     "installer": {
-  echo       "name": "KairoSetup.exe",
+  echo       "name": "!SETUP_ASSET_NAME!",
   echo       "sha256": "%INSTALLER_SHA%",
   echo       "size": %INSTALLER_SIZE%
   echo     },
@@ -500,7 +538,7 @@ if "%CHANNEL%"=="alpha" set "PRERELEASE_FLAG=--prerelease"
 if "%CHANNEL%"=="beta" set "PRERELEASE_FLAG=--prerelease"
 
 gh release create v%FULL_VERSION% ^
-    "%OUTPUT%\KairoSetup.exe" ^
+    "!TARGET_INSTALLER_EXE!" ^
     "%OUTPUT%\frontend.zip" ^
     "%OUTPUT%\backend.zip" ^
     "%OUTPUT%\latest-%CHANNEL%.json" ^
