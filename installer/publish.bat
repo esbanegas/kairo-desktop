@@ -326,15 +326,33 @@ REM 4. Compilar Instalador
 echo [3/4] Compilando instalador (Inno Setup)...
 cd /d "%INSTALLER%"
 
-set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
-if not exist "!ISCC!" (
-    set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+REM Permite fijar la version/instalacion exacta sin tocar este script, util
+REM mientras se prueban en paralelo Inno Setup 6 y 7 en la misma maquina.
+set "ISCC="
+if defined ISCC_PATH if exist "%ISCC_PATH%" set "ISCC=%ISCC_PATH%"
+
+REM Busqueda por patron "Inno Setup *" (no atada a una version): evita que
+REM cada mayor version (6 -> 7 -> ...) rompa esta deteccion de nuevo.
+if not defined ISCC (
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%LocalAppData%\Programs\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%LocalAppData%\Programs\%%D\ISCC.exe" set "ISCC=%LocalAppData%\Programs\%%D\ISCC.exe"
+    )
 )
-if not exist "!ISCC!" (
-    for /f "tokens=*" %%I in ('where iscc.exe 2^>nul') do set "ISCC=%%I"
+REM %ProgramFiles(x86)% no se puede referenciar dentro de un bloque if (...):
+REM el ")" de su propio nombre cierra el bloque antes de tiempo. Se copia a
+REM una variable sin parentesis antes de entrar a los bloques que siguen.
+set "PF86=%ProgramFiles(x86)%"
+if not defined ISCC (
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%PF86%\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%PF86%\%%D\ISCC.exe" set "ISCC=%PF86%\%%D\ISCC.exe"
+    )
 )
-if not exist "!ISCC!" (
-    echo [ERROR] No se encontro ISCC.exe. Asegurate de tener Inno Setup 6 instalado.
+if not defined ISCC (
+    for /f "tokens=*" %%I in ('where iscc.exe 2^>nul') do if not defined ISCC set "ISCC=%%I"
+)
+if not defined ISCC (
+    echo [ERROR] No se encontro ISCC.exe. Asegurate de tener Inno Setup instalado,
+    echo         o define ISCC_PATH con la ruta completa al ejecutable.
     call :restore_version
     exit /b 1
 )
