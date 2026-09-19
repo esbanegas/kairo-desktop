@@ -68,12 +68,21 @@ Desde `kairo-desktop/installer`, ejecuta `publish.bat` (sin argumentos abre el m
   [3] Production
 
 Canal seleccionado: alpha
- [1] Compilar paquetes (--build-only)
- [2] Publicar Release a GitHub (--publish)
- [3] Compilar y Publicar todo (--all)
- [4] Verificar consistencia (solo lectura: manifest/tag/Release/assets)
- [5] Salir
+
+ Instalador ESTANDAR (~125 MB, descarga PostgreSQL solo si hace falta):
+  [1] Compilar paquetes (--build-only)
+  [2] Publicar Release a GitHub (--publish)
+  [3] Compilar y Publicar todo (--all)
+
+ Instalador OFFLINE (~482 MB, PostgreSQL embebido, sin Internet):
+  [4] Compilar instalador offline (--build-only --offline)
+  [5] Compilar y Publicar offline (--all --offline)
+
+  [6] Verificar consistencia (solo lectura: manifest/tag/Release/assets)
+  [7] Salir
 ```
+
+> Los dos sabores son el mismo Kairo, misma versión y mismo canal. Ver [sección 13](#13-postgresql-como-dependencia-bajo-demanda).
 
 También puede invocarse sin menús, para CI/scripts:
 ```
@@ -81,6 +90,8 @@ publish.bat --build-only alpha
 publish.bat --publish     beta
 publish.bat --all         production
 publish.bat --verify      production
+publish.bat --build-only alpha --offline
+publish.bat --all        beta  --offline
 ```
 
 Si el canal es **Production**, el paso de publicación pide una confirmación extra (S/N) antes de tocar GitHub — es el canal de mayor impacto.
@@ -265,3 +276,90 @@ Al desinstalar **no se pierden datos**: la base de datos y `C:\ProgramData\Kairo
 Justamente porque `C:\ProgramData\KairoPOS` sobrevive, el instalador nuevo **no intenta reescribir sus permisos**. Esa carpeta fue creada por el Setup elevado de alpha.8, así que pertenece a la cuenta administradora y un usuario estándar no puede cambiar su ACL. No hace falta hacerlo: el instalador viejo ya le había dado permiso de modificación a todos los usuarios, así que el cajero puede escribir ahí. En una instalación limpia, el cajero crea la carpeta y queda como propietario. Los dos caminos funcionan sin tocar ningún permiso ni borrar nada.
 
 Si además quedó un `admin_credentials.txt` de alpha.8 (con permisos restringidos a Administradores), el instalador nuevo no puede sobrescribirlo y tampoco lo borra: escribe las credenciales junto a la aplicación, en `%LocalAppData%\Programs\KAIRO POsdmin_credentials.txt`, y lo registra en el log.
+
+---
+
+## 13. PostgreSQL como dependencia bajo demanda
+
+Desde esta versión, `KairoSetup.exe` **no embebe PostgreSQL**. El instalador pasó de ~482 MB a ~125 MB y PostgreSQL se descarga solo cuando hace falta.
+
+### Los dos sabores
+
+| | Tamaño | Internet | PostgreSQL |
+|---|---|---|---|
+| `KairoSetup.exe` | ~125 MB | Solo si hay que descargar PG | Bajo demanda |
+| `KairoSetup-Offline.exe` | ~482 MB | No necesario | Embebido |
+
+**Ambos producen exactamente la misma instalación de Kairo y usan el mismo sistema de actualizaciones.** El sabor offline **no** es una versión distinta: misma versión, mismo canal, mismo `frontend.zip` y `backend.zip`. Lo único que cambia es de dónde sale el instalador de PostgreSQL.
+
+### El release de dependencias
+
+PostgreSQL vive en un release aparte, de larga vida, que **no se vuelve a subir en cada build**:
+
+```bash
+gh release create deps-postgresql-17 \
+  "installer/assets/postgresql_installer.exe" \
+  --title "Dependencias: PostgreSQL 17" \
+  --notes "Instalador de PostgreSQL 17 usado por KairoSetup.exe bajo demanda." \
+  --latest=false
+```
+
+El `--latest=false` evita que GitHub lo marque como "Latest release" y confunda a quien busca Kairo.
+
+La URL y el hash están fijados como defines en `enlip_setup.iss` y se pueden sobreescribir sin tocar el archivo:
+
+```
+/DPostgresUrl="https://..." /DPostgresSha256="<64 hex>"
+```
+
+**La versión está fijada a propósito.** Nada de "latest PostgreSQL": un cambio de versión río arriba no debe alterar en silencio lo que se instala en las cajas.
+
+### Cómo compilar cada sabor
+
+Desde el menú de `publish.bat`, tras elegir el canal:
+
+```
+Instalador ESTANDAR (~125 MB, descarga PostgreSQL solo si hace falta):
+ [1] Compilar paquetes          [2] Publicar          [3] Compilar y Publicar
+
+Instalador OFFLINE (~482 MB, PostgreSQL embebido, sin Internet):
+ [4] Compilar instalador offline    [5] Compilar y Publicar offline
+```
+
+O sin menú, con `--offline` como modificador:
+
+```
+publish.bat --build-only alpha --offline
+publish.bat --all       beta  --offline
+```
+
+El build estándar **compila sin necesidad de que `postgresql_installer.exe` exista en disco**, lo que permite builds limpios en CI (el archivo está en `.gitignore`). El build offline sí lo exige y falla en tiempo de compilación si falta.
+
+### Qué ve el usuario al instalar
+
+Hay una página nueva, **Conexión con PostgreSQL**, antes del resumen final:
+
+- **Si PostgreSQL ya está instalado**: muestra la instancia real detectada — versión, ubicación, servicio y puerto leído de `postgresql.conf`. Host, puerto, usuario y contraseña son editables, y hay un botón **Probar conexión**. No se reinstala nada.
+- **Si no está**: ofrece **Descargar e instalar** (con progreso en MB, cancelable y verificación SHA-256) o **Continuar sin PostgreSQL**, que avisa claramente que la instalación no queda lista para usarse.
+
+**No se puede avanzar sin una conexión probada**, salvo que se elija explícitamente continuar sin PostgreSQL. Antes, una contraseña mal tecleada pasaba desapercibida y fallaba recién al abrir Kairo por primera vez, con un error incomprensible.
+
+Excepción: si falta `psql.exe` (el componente *Command Line Tools* del instalador de EDB es desmarcable), no se puede verificar; se avisa y se deja continuar, porque bloquear por una herramienta ausente sería peor que el problema.
+
+### Detección multi-instancia
+
+La detección ya no asume `localhost:5432`. Lee del registro la versión y la ubicación, confirma el servicio de Windows contra `HKLM\SYSTEM\CurrentControlSet\Services`, y obtiene el puerto de `postgresql.conf`.
+
+Esto importa en equipos con varias instancias — por ejemplo PostgreSQL 16 en 5432 y 17 en 5433. Antes, el modo automático escribía `5432` cableado en `appsettings.json` y podía apuntar a la instancia equivocada.
+
+Si el directorio de datos no es legible (suele estar restringido al servicio y a Administradores, y el Setup corre como usuario estándar), el puerto queda en 5432 y se marca como no verificado. Por eso el campo es editable y la verdad final la da **Probar conexión**, no la detección.
+
+### Seguridad de la contraseña
+
+`PGPASSWORD` se pasa por **variable de entorno del proceso**, nunca por línea de comandos: los argumentos de un proceso son visibles para cualquier usuario de la máquina y acabarían en logs. Se limpia siempre después de usarse y no se escribe a disco.
+
+El instalador descargado **no se ejecuta si el SHA-256 no coincide**.
+
+### El updater no cambia
+
+PostgreSQL **no participa en las actualizaciones**. El updater sigue descargando solo `frontend.zip` y `backend.zip`, e ignora la entrada `installer` del manifiesto. Una máquina instalada con el sabor estándar y otra con el offline se actualizan exactamente igual.
