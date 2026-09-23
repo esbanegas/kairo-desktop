@@ -193,10 +193,17 @@ set "BASE_URL=!GITHUB_BASE_URL:{repo_owner}=%REPO_OWNER%!"
 set "BASE_URL=!BASE_URL:{repo_name}=%REPO_NAME%!"
 set "BASE_URL=!BASE_URL:{version}=%FULL_VERSION%!"
 
-REM Verificar que kairo-updater.exe exista en assets
-if not exist "%INSTALLER%\assets\kairo-updater\kairo-updater.exe" (
-    echo [INFO] kairo-updater.exe no encontrado en assets. Compilando automaticamente...
-    call "%ROOT%\kairo-desktop\updater\build-updater.bat"
+REM Se recompila SIEMPRE, no solo "si falta". Antes, una vez que el .exe
+REM existia en assets/ nunca se volvia a tocar aunque Program.cs cambiara -
+REM asi fue como una correccion real (esperar a que ENLIPWebApi.exe muera
+REM antes de sobrescribirlo) quedo compilada en el repo pero nunca llego a
+REM salir en un build nuevo, porque el binario cacheado ya "existia".
+echo [INFO] Compilando kairo-updater.exe...
+call "%ROOT%\kairo-desktop\updater\build-updater.bat"
+if !ERRORLEVEL! NEQ 0 (
+    echo [ERROR] Fallo la compilacion de kairo-updater.exe.
+    call :restore_version
+    exit /b 1
 )
 
 echo Canal: %CHANNEL%
@@ -393,11 +400,20 @@ if not exist "!INSTALLER_EXE!" (
 copy /y "!INSTALLER_EXE!" "!TARGET_INSTALLER_EXE!" >nul
 echo [OK] !SETUP_ASSET_NAME!
 
+REM Se publica tambien kairo-updater.exe como asset descargable (no solo
+REM embebido dentro del instalador): es lo que le permite a un cliente que ya
+REM tiene la app instalada reemplazar su propio updater via actualizacion
+REM incremental, sin depender de que alguien lo reinstale a mano.
+set "UPDATER_ASSET=%OUTPUT%\kairo-updater.exe"
+copy /y "%INSTALLER%\assets\kairo-updater\kairo-updater.exe" "%UPDATER_ASSET%" >nul
+echo [OK] kairo-updater.exe (asset de auto-actualizacion)
+
 REM 5. Calcular Hashes SHA256
 echo [4/4] Calculando Hashes...
 for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%FRONTEND_ZIP%' -Algorithm SHA256).Hash.ToLower()"') do set "FRONTEND_SHA=%%H"
 for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%BACKEND_ZIP%' -Algorithm SHA256).Hash.ToLower()"') do set "BACKEND_SHA=%%H"
 for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%TARGET_INSTALLER_EXE%' -Algorithm SHA256).Hash.ToLower()"') do set "INSTALLER_SHA=%%H"
+for /f "tokens=1" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%UPDATER_ASSET%' -Algorithm SHA256).Hash.ToLower()"') do set "UPDATER_SHA=%%H"
 
 REM Tamanos en bytes: el cliente los usa para la barra de progreso combinada y
 REM para detectar una descarga truncada antes de gastar tiempo en el SHA256.
@@ -406,6 +422,7 @@ REM Content-Length de cada archivo y el porcentaje pega saltos.
 for %%F in ("%FRONTEND_ZIP%")        do set "FRONTEND_SIZE=%%~zF"
 for %%F in ("%BACKEND_ZIP%")         do set "BACKEND_SIZE=%%~zF"
 for %%F in ("%TARGET_INSTALLER_EXE%") do set "INSTALLER_SIZE=%%~zF"
+for %%F in ("%UPDATER_ASSET%")        do set "UPDATER_SIZE=%%~zF"
 
 REM 6. Generar latest-<channel>.json (KAIRO UPDATE MANIFEST V1.0)
 set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
@@ -422,6 +439,11 @@ set "MANIFEST=%OUTPUT%\latest-%CHANNEL%.json"
   echo   "distribution": {
   echo     "provider": "github_releases",
   echo     "base_url": "%BASE_URL%"
+  echo   },
+  echo   "updater": {
+  echo     "name": "kairo-updater.exe",
+  echo     "sha256": "%UPDATER_SHA%",
+  echo     "size": %UPDATER_SIZE%
   echo   },
   echo   "files": {
   echo     "installer": {
@@ -559,6 +581,7 @@ gh release create v%FULL_VERSION% ^
     "!TARGET_INSTALLER_EXE!" ^
     "%OUTPUT%\frontend.zip" ^
     "%OUTPUT%\backend.zip" ^
+    "%OUTPUT%\kairo-updater.exe" ^
     "%OUTPUT%\latest-%CHANNEL%.json" ^
     --title "Kairo POS v%FULL_VERSION%" ^
     --notes "Nueva actualizacion de Kairo POS v%FULL_VERSION% (canal: %CHANNEL%)" ^

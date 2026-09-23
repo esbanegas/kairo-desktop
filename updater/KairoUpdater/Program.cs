@@ -45,6 +45,26 @@ Log("=== Kairo Updater started ===");
 Log($"Script: {scriptPath}");
 Log($"Target PID: {targetPid}");
 
+// ── Limpiar restos de un self-update anterior ─────────────────────────────────
+// Ver SelfUpdate() más abajo: al reemplazarse a sí mismo, este proceso renombra
+// su propio .exe en ejecución a "*.exe.old" en vez de borrarlo (Windows no deja
+// borrar un binario mientras corre, pero sí renombrarlo). Para cuando esta
+// corrida arranca, el proceso que dejó ese .old ya terminó hace rato y el
+// archivo esta libre.
+try
+{
+    var selfDir = Path.GetDirectoryName(Environment.ProcessPath ?? "");
+    if (!string.IsNullOrEmpty(selfDir))
+    {
+        foreach (var leftover in Directory.GetFiles(selfDir, "*.exe.old"))
+        {
+            try { File.Delete(leftover); Log($"Limpieza: eliminado {leftover}"); }
+            catch (Exception ex) { Log($"WARNING: no se pudo limpiar {leftover}: {ex.Message}"); }
+        }
+    }
+}
+catch (Exception ex) { Log($"WARNING: limpieza de restos de self-update fallo: {ex.Message}"); }
+
 // ── Validate input ────────────────────────────────────────────────────────────
 if (string.IsNullOrEmpty(scriptPath) || !File.Exists(scriptPath))
 {
@@ -70,6 +90,21 @@ catch (Exception ex)
 }
 
 Log($"Updating to version: {script.Version}");
+
+// ── Self-update: reemplazar este mismo kairo-updater.exe ─────────────────────
+// Se hace de PRIMERO, antes de tocar Electron o el backend, y nunca bloquea el
+// resto del proceso (falla en silencio si algo sale mal: la actualizacion de
+// la app sigue con el binario actual). El binario que queda en disco lo
+// recoge el PROXIMO intento de actualizacion — incluido un reintento manual
+// tras un fallo — sin que el cliente tenga que reinstalar a mano. Ver
+// SelfUpdate() para el detalle de por que renombrar (no borrar) funciona con
+// un .exe en ejecucion.
+var updaterPkg = script.Packages.FirstOrDefault(p => p.Name == "updater");
+if (updaterPkg != null)
+{
+    try { SelfUpdate(updaterPkg, Log); }
+    catch (Exception ex) { Log($"WARNING: self-update de kairo-updater.exe fallo: {ex.Message}"); }
+}
 
 // ── Wait for Electron to exit ─────────────────────────────────────────────────
 if (targetPid > 0)
@@ -165,6 +200,8 @@ string? failureReason = null;
 
 foreach (var pkg in script.Packages)
 {
+    if (pkg.Name == "updater") continue; // ya se manejo arriba, en SelfUpdate()
+
     Log($"Applying {pkg.Name} from {pkg.Source}...");
     try
     {
@@ -317,6 +354,37 @@ if (doRestart && !string.IsNullOrEmpty(script.AppExe) && File.Exists(script.AppE
 Log(success ? "=== Update completed successfully ===" : "=== Update failed (rolled back) ===");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Reemplaza el kairo-updater.exe EN EJECUCION por el que se acaba de
+// descargar. Funciona porque Windows permite renombrar (no borrar) el
+// archivo de un proceso en ejecucion: el proceso actual sigue corriendo
+// desde el archivo renombrado hasta que termina, y el nombre original queda
+// libre de inmediato para el binario nuevo. El ".old" resultante lo limpia
+// la PROXIMA corrida (ver el bloque de limpieza al inicio de este archivo),
+// para entonces ya nadie lo tiene abierto.
+static void SelfUpdate(UpdatePackage pkg, Action<string> log)
+{
+    if (!File.Exists(pkg.Source))
+    {
+        log($"  SKIP self-update: {pkg.Source} no encontrado.");
+        return;
+    }
+
+    var currentExePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+    if (string.IsNullOrEmpty(currentExePath))
+    {
+        log("  SKIP self-update: no se pudo determinar la ruta del ejecutable actual.");
+        return;
+    }
+
+    var oldPath = currentExePath + ".old";
+    try { if (File.Exists(oldPath)) File.Delete(oldPath); } catch { /* se reintenta en la proxima corrida */ }
+
+    File.Move(currentExePath, oldPath);
+    File.Copy(pkg.Source, currentExePath, overwrite: true);
+    log($"  OK: kairo-updater.exe reemplazado ({Path.GetFileName(oldPath)} pendiente de limpieza).");
+}
+
 static void CopyDirectory(string source, string dest)
 {
     Directory.CreateDirectory(dest);
