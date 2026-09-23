@@ -5,7 +5,7 @@
     "name": "Kairo POS",
     "version": "1.0.0-beta.1",
     "channel": "beta",
-    "release_date": "2026-09-23T07:21:24Z"
+    "release_date": "2026-09-23T08:26:07Z"
   },
   "distribution": {
     "provider": "github_releases",
@@ -13,23 +13,23 @@
   },
   "updater": {
     "name": "kairo-updater.exe",
-    "sha256": "4af823de2f703298212166ff679d251bb5bed3cfdc6c39f837ef577e432bf616",
+    "sha256": "93e17552d9aae0e10dc3e9ceca4a1a44125cf0f694a70b0e67e11b823e028a77",
     "size": 76589448
   },
   "files": {
     "installer": {
       "name": "KairoSetup.exe",
-      "sha256": "83a2dcf78ce91db18a2ee958db21b8d96f8e15d5f32a5327b15218d9d81ebdb7",
-      "size": 147202462
+      "sha256": "33c7369d8c49cc7379c5499ad359b4c610318d21b338be7fed898d2c7676c8d9",
+      "size": 147182331
     },
     "frontend": {
       "name": "frontend.zip",
-      "sha256": "dc03f54d6f6a948b21710facc0f97d487b872ee2f52b5cf29b853a2a922bbd52",
-      "size": 7215625
+      "sha256": "f504909ed5bc5758bdf607584d0484d118a9f3cf0477ba1490283ad54afb5258",
+      "size": 7215728
     },
     "backend": {
       "name": "backend.zip",
-      "sha256": "fee910e23e1cd1b508540eee6fd31260989af30d578d4ff324aa78a90890bcba",
+      "sha256": "10dbbf488f1749436c789caa8f12844a7a9e3179a1a8122f9d4031557a338778",
       "size": 56463717
     }
   },
