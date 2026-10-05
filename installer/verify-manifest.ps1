@@ -95,8 +95,10 @@ if ($ghAvailable) {
 # ── 4. Verificar que cada asset listado en el manifest exista de verdad ────
 Write-Host "[4/4] Verificando assets referenciados por el manifest..."
 
-foreach ($fileKey in $manifest.files.PSObject.Properties.Name) {
-    $file = $manifest.files.$fileKey
+$assetsToCheck = @($manifest.files.PSObject.Properties.Name | ForEach-Object { $manifest.files.$_ })
+if ($manifest.updater) { $assetsToCheck += $manifest.updater }
+
+foreach ($file in $assetsToCheck) {
     $assetUrl = "$baseUrl/$($file.name)"
 
     try {
