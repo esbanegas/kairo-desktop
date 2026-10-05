@@ -117,15 +117,30 @@ if exist "output" (
 )
 
 :: Ruta de ISCC
-set "ISCC=C:\Users\ebanegas\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
-if not exist "!ISCC!" (
-    set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+set "ISCC="
+if defined ISCC_PATH if exist "%ISCC_PATH%" set "ISCC=%ISCC_PATH%"
+if not defined ISCC (
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%ProgramFiles%\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%ProgramFiles%\%%D\ISCC.exe" set "ISCC=%ProgramFiles%\%%D\ISCC.exe"
+    )
 )
-if not exist "!ISCC!" (
-    for /f "tokens=*" %%I in ('where iscc.exe 2^>nul') do set "ISCC=%%I"
+set "PF86=%ProgramFiles(x86)%"
+if not defined ISCC (
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%PF86%\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%PF86%\%%D\ISCC.exe" set "ISCC=%PF86%\%%D\ISCC.exe"
+    )
 )
-if not exist "!ISCC!" (
-    echo [ERROR] No se encontro ISCC.exe. Asegurate de tener Inno Setup 6 instalado.
+if not defined ISCC (
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%LocalAppData%\Programs\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%LocalAppData%\Programs\%%D\ISCC.exe" set "ISCC=%LocalAppData%\Programs\%%D\ISCC.exe"
+    )
+)
+if not defined ISCC (
+    for /f "tokens=*" %%I in ('where iscc.exe 2^>nul') do if not defined ISCC set "ISCC=%%I"
+)
+if not defined ISCC (
+    echo [ERROR] No se encontro ISCC.exe. Asegurate de tener Inno Setup instalado,
+    echo         o define ISCC_PATH con la ruta completa al ejecutable.
     call :restore_version
     pause
     exit /b 1

@@ -132,7 +132,7 @@ Cada paso de git/gh (tag, push del tag, creación del Release, commit del manifi
 
 1. **Node.js y pnpm** (para `acg-web`).
 2. **.NET 8 SDK** (para `ENLIPWebApi`).
-3. **Inno Setup 6** (`C:\Users\<Usuario>\AppData\Local\Programs\Inno Setup 6\ISCC.exe`).
+3. **Inno Setup 6 o 7** (detectado automáticamente en `Program Files`, `Program Files (x86)`, `AppData\Local\Programs` o vía variable `ISCC_PATH`).
 4. **GitHub CLI (`gh`)** autenticado (`gh auth login`).
 
 ---
