@@ -333,9 +333,14 @@ if defined ISCC_PATH if exist "%ISCC_PATH%" set "ISCC=%ISCC_PATH%"
 
 REM Busqueda por patron "Inno Setup *" (no atada a una version): evita que
 REM cada mayor version (6 -> 7 -> ...) rompa esta deteccion de nuevo.
+REM Se busca en:
+REM   1. %ProgramFiles%\Inno Setup * (64 bits: C:\Program Files, ej. Inno Setup 7)
+REM   2. %ProgramFiles(x86)%\Inno Setup * (32 bits tradicional)
+REM   3. %LocalAppData%\Programs\Inno Setup * (instalacion por usuario)
+REM   4. PATH del sistema via where iscc.exe
 if not defined ISCC (
-    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%LocalAppData%\Programs\Inno Setup *" 2^>nul') do (
-        if not defined ISCC if exist "%LocalAppData%\Programs\%%D\ISCC.exe" set "ISCC=%LocalAppData%\Programs\%%D\ISCC.exe"
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%ProgramFiles%\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%ProgramFiles%\%%D\ISCC.exe" set "ISCC=%ProgramFiles%\%%D\ISCC.exe"
     )
 )
 REM %ProgramFiles(x86)% no se puede referenciar dentro de un bloque if (...):
@@ -345,6 +350,11 @@ set "PF86=%ProgramFiles(x86)%"
 if not defined ISCC (
     for /f "delims=" %%D in ('dir /b /ad-h /o-n "%PF86%\Inno Setup *" 2^>nul') do (
         if not defined ISCC if exist "%PF86%\%%D\ISCC.exe" set "ISCC=%PF86%\%%D\ISCC.exe"
+    )
+)
+if not defined ISCC (
+    for /f "delims=" %%D in ('dir /b /ad-h /o-n "%LocalAppData%\Programs\Inno Setup *" 2^>nul') do (
+        if not defined ISCC if exist "%LocalAppData%\Programs\%%D\ISCC.exe" set "ISCC=%LocalAppData%\Programs\%%D\ISCC.exe"
     )
 )
 if not defined ISCC (
