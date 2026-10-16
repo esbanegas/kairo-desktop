@@ -3,29 +3,34 @@
   "schema_version": "1.0.0",
   "app": {
     "name": "Kairo POS",
-    "version": "1.0.0-alpha.6",
+    "version": "1.0.0-alpha.7",
     "channel": "alpha",
-    "release_date": "2026-09-17T04:46:31Z"
+    "release_date": "2026-10-16T03:20:51Z"
   },
   "distribution": {
     "provider": "github_releases",
-    "base_url": "https://github.com/esbanegas/kairo-desktop/releases/download/v1.0.0-alpha.6"
+    "base_url": "https://github.com/esbanegas/kairo-desktop/releases/download/v1.0.0-alpha.7"
+  },
+  "updater": {
+    "name": "kairo-updater.exe",
+    "sha256": "7a2b5eafa8d951c3bca27ff8c05238d4eedabb88e2eebc07a32815d61b3ce846",
+    "size": 76589434
   },
   "files": {
     "installer": {
       "name": "KairoSetup.exe",
-      "sha256": "e2babcd7f20ddc8914b57118d1998bb3eb05f529f0804b9c268862db3cec6ba8",
-      "size": 147143435
+      "sha256": "8b7534a7ef33045aee23bb91ebd64b6d001247016e795bf373a54bc64ff2603d",
+      "size": 147361853
     },
     "frontend": {
       "name": "frontend.zip",
-      "sha256": "44219d4b8650f5fe16a588d71bd44f07931a1fa9c1156f47e4f551da47d480e6",
-      "size": 7167156
+      "sha256": "1b6b2d02ebbf0171c7b26062bcfc2ee54d588b779b0ee298ca2eb170a9467ae9",
+      "size": 7315493
     },
     "backend": {
       "name": "backend.zip",
-      "sha256": "768a336b69d040043cf91b00cacadad060f9c1eafcae056820505a283a684124",
-      "size": 56373836
+      "sha256": "7d2df428e2d24f58745db6f2f31e113c45ea03738dbbff1a8c7e7ad50188abd0",
+      "size": 56552425
     }
   },
   "update_policy": {
